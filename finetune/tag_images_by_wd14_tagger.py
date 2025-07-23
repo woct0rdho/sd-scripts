@@ -206,10 +206,10 @@ def main(args):
             )
         else:
             providers = (
-                ["CUDAExecutionProvider"]
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
                 if "CUDAExecutionProvider" in ort.get_available_providers()
                 else (
-                    ["ROCMExecutionProvider"]
+                    ["ROCMExecutionProvider", "CPUExecutionProvider"]
                     if "ROCMExecutionProvider" in ort.get_available_providers()
                     else ["CPUExecutionProvider"]
                 )
