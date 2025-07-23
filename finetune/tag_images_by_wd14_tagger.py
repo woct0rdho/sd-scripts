@@ -155,7 +155,7 @@ def main(args):
             ort_sess = ort.InferenceSession(
                 onnx_path,
                 providers=(
-                    ["CUDAExecutionProvider"] if "CUDAExecutionProvider" in ort.get_available_providers() else
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in ort.get_available_providers() else
                     ["ROCMExecutionProvider"] if "ROCMExecutionProvider" in ort.get_available_providers() else
                     ["CPUExecutionProvider"]
                 ),
