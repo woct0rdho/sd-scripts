@@ -201,7 +201,6 @@ def rank_resize(S, rank, dynamic_method, dynamic_param, scale=1):
 def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dynamic_method, dynamic_param, verbose):
     max_old_rank = None
     new_alpha = None
-    verbose_str = "\n"
     fro_list = []
 
     if dynamic_method:
@@ -274,15 +273,13 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
                     if not np.isnan(fro_retained):
                         fro_list.append(float(fro_retained))
 
-                    verbose_str += f"{block_down_name:75} | "
+                    verbose_str = f"{block_down_name:75} | "
                     verbose_str += (
                         f"sum(S) retained: {sum_retained:.1%}, fro retained: {fro_retained:.1%}, max(S) ratio: {max_ratio:0.1f}"
                     )
-
-                if verbose and dynamic_method:
-                    verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}\n"
-                else:
-                    verbose_str += "\n"
+                    if dynamic_method:
+                        verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}"
+                    tqdm.write(verbose_str)
 
                 new_alpha = param_dict["new_alpha"]
                 o_lora_sd[block_down_name + lora_down_name + weight_name] = param_dict["lora_down"].to(save_dtype).contiguous()
@@ -297,7 +294,6 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
                 del param_dict
 
     if verbose:
-        print(verbose_str)
         print(f"Average Frobenius norm retention: {np.mean(fro_list):.2%} | std: {np.std(fro_list):0.3f}")
     logger.info("resizing complete")
     return o_lora_sd, max_old_rank, new_alpha
