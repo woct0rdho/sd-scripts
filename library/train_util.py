@@ -2831,26 +2831,26 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool, alph
         return False
 
     try:
-        npz = np.load(npz_path)
-        if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
-            return False
-        if npz["latents"].shape[1:3] != expected_latents_size:
-            return False
-
-        if flip_aug:
-            if "latents_flipped" not in npz:
+        with np.load(npz_path) as npz:
+            if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
                 return False
-            if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+            if npz["latents"].shape[1:3] != expected_latents_size:
                 return False
 
-        if alpha_mask:
-            if "alpha_mask" not in npz:
-                return False
-            if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
-                return False
-        else:
-            if "alpha_mask" in npz:
-                return False
+            if flip_aug:
+                if "latents_flipped" not in npz:
+                    return False
+                if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+                    return False
+
+            if alpha_mask:
+                if "alpha_mask" not in npz:
+                    return False
+                if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
+                    return False
+            else:
+                if "alpha_mask" in npz:
+                    return False
     except Exception as e:
         logger.error(f"Error loading file: {npz_path}")
         raise e
