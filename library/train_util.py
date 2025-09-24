@@ -1173,7 +1173,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 # check disk cache exists and size of latents
                 if caching_strategy.cache_to_disk:
                     # info.latents_npz = os.path.splitext(info.absolute_path)[0] + file_suffix
-                    info.latents_npz = caching_strategy.get_latents_npz_path(info.absolute_path, info.image_size)
+                    info.latents_npz = caching_strategy.get_latents_npz_path(info.absolute_path, info.bucket_reso)
 
                     # if the modulo of num_processes is not equal to process_index, skip caching
                     # this makes each process cache different latents
