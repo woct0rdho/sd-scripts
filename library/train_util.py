@@ -2247,26 +2247,26 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool, alph
         return False
 
     try:
-        npz = np.load(npz_path)
-        if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
-            return False
-        if npz["latents"].shape[1:3] != expected_latents_size:
-            return False
-
-        if flip_aug:
-            if "latents_flipped" not in npz:
+        with np.load(npz_path) as npz:
+            if "latents" not in npz or "original_size" not in npz or "crop_ltrb" not in npz:  # old ver?
                 return False
-            if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+            if npz["latents"].shape[1:3] != expected_latents_size:
                 return False
 
-        if alpha_mask:
-            if "alpha_mask" not in npz:
-                return False
-            if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
-                return False
-        else:
-            if "alpha_mask" in npz:
-                return False
+            if flip_aug:
+                if "latents_flipped" not in npz:
+                    return False
+                if npz["latents_flipped"].shape[1:3] != expected_latents_size:
+                    return False
+
+            if alpha_mask:
+                if "alpha_mask" not in npz:
+                    return False
+                if (npz["alpha_mask"].shape[1], npz["alpha_mask"].shape[0]) != reso:  # HxW => WxH != reso
+                    return False
+            else:
+                if "alpha_mask" in npz:
+                    return False
     except Exception as e:
         logger.error(f"Error loading file: {npz_path}")
         raise e
@@ -2278,16 +2278,16 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool, alph
 def load_latents_from_disk(
     npz_path,
 ) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
-    npz = np.load(npz_path)
-    if "latents" not in npz:
-        raise ValueError(f"error: npz is old format. please re-generate {npz_path}")
+    with np.load(npz_path) as npz:
+        if "latents" not in npz:
+            raise ValueError(f"error: npz is old format. please re-generate {npz_path}")
 
-    latents = npz["latents"]
-    original_size = npz["original_size"].tolist()
-    crop_ltrb = npz["crop_ltrb"].tolist()
-    flipped_latents = npz["latents_flipped"] if "latents_flipped" in npz else None
-    alpha_mask = npz["alpha_mask"] if "alpha_mask" in npz else None
-    return latents, original_size, crop_ltrb, flipped_latents, alpha_mask
+        latents = npz["latents"]
+        original_size = npz["original_size"].tolist()
+        crop_ltrb = npz["crop_ltrb"].tolist()
+        flipped_latents = npz["latents_flipped"] if "latents_flipped" in npz else None
+        alpha_mask = npz["alpha_mask"] if "alpha_mask" in npz else None
+        return latents, original_size, crop_ltrb, flipped_latents, alpha_mask
 
 
 def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None, alpha_mask=None):
