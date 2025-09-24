@@ -156,7 +156,7 @@ def cache_to_disk(args: argparse.Namespace) -> None:
                 image_info.image = image
                 image_info.bucket_reso = bucket_reso
                 image_info.resized_size = resized_size
-                image_info.latents_npz = os.path.splitext(absolute_path)[0] + ".npz"
+                image_info.latents_npz = os.path.splitext(absolute_path)[0] + f"_{bucket_reso[0]}x{bucket_reso[1]}.npz"
 
                 if args.skip_existing:
                     if train_util.is_disk_cached_latents_is_expected(

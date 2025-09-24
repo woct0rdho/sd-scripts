@@ -45,7 +45,7 @@ def collate_fn_remove_corrupted(batch):
     return batch
 
 
-def get_npz_filename(data_dir, image_key, is_full_path, recursive):
+def get_npz_filename(data_dir, image_key, reso, is_full_path, recursive):
     if is_full_path:
         base_name = os.path.splitext(os.path.basename(image_key))[0]
         relative_path = os.path.relpath(os.path.dirname(image_key), data_dir)
@@ -54,9 +54,9 @@ def get_npz_filename(data_dir, image_key, is_full_path, recursive):
         relative_path = ""
 
     if recursive and relative_path:
-        return os.path.join(data_dir, relative_path, base_name) + ".npz"
+        return os.path.join(data_dir, relative_path, base_name) + f"_{reso[0]}x{reso[1]}.npz"
     else:
-        return os.path.join(data_dir, base_name) + ".npz"
+        return os.path.join(data_dir, base_name) + f"_{reso[0]}x{reso[1]}.npz"
 
 
 def main(args):
@@ -173,7 +173,7 @@ def main(args):
         ), f"internal error resized size is small: {resized_size}, {reso}"
 
         # 既に存在するファイルがあればshape等を確認して同じならskipする
-        npz_file_name = get_npz_filename(args.train_data_dir, image_key, args.full_path, args.recursive)
+        npz_file_name = get_npz_filename(args.train_data_dir, image_key, reso, args.full_path, args.recursive)
         if args.skip_existing:
             if train_util.is_disk_cached_latents_is_expected(reso, npz_file_name, args.flip_aug):
                 continue
