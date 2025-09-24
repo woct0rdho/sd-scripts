@@ -73,8 +73,24 @@ class LoRAModule(torch.nn.Module):
         self.register_buffer("alpha", torch.tensor(alpha))  # 定数として扱える
 
         # same as microsoft's
-        torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-        torch.nn.init.zeros_(self.lora_up.weight)
+        # torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        # torch.nn.init.zeros_(self.lora_up.weight)
+
+        # Orthogonal init
+        # https://github.com/huggingface/peft/blob/293aea5df6db240856a77f89955d1a89ce38b50d/src/peft/tuners/lora/layer.py#L483
+        from math import sqrt
+        X = torch.randn(lora_dim, lora_dim)  # float32
+        Q, _ = torch.linalg.qr(X)
+        q_odd = Q[0::2, :]
+        q_even = Q[1::2, :]
+        # Normalize
+        q_odd /= sqrt(q_odd.shape[0] * (in_dim + out_dim) / 2)
+        q_even /= sqrt(q_even.shape[0] * (in_dim + out_dim) / 2)
+        lora_A = torch.randn(in_dim, (lora_dim + 1) // 2) @ q_odd
+        lora_B = torch.randn(out_dim, lora_dim // 2) @ q_even
+        lora_A = lora_A.T
+        self.lora_down.weight.data[:] = lora_A.to(self.lora_down.weight.device, self.lora_down.weight.dtype)
+        self.lora_up.weight.data[:] = lora_B.to(self.lora_up.weight.device, self.lora_up.weight.dtype)
 
         self.multiplier = multiplier
         self.org_module = org_module  # remove in applying
