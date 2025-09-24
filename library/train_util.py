@@ -2036,11 +2036,15 @@ class DreamBoothDataset(BaseDataset):
 
         self.enable_bucket = enable_bucket
         if self.enable_bucket:
-            min_bucket_reso, max_bucket_reso = self.adjust_min_max_bucket_reso_by_steps(
-                resolution, min_bucket_reso, max_bucket_reso, bucket_reso_steps
-            )
-            self.min_bucket_reso = min_bucket_reso
-            self.max_bucket_reso = max_bucket_reso
+            if bucket_no_upscale:
+                self.min_bucket_reso = None
+                self.max_bucket_reso = None
+            else:
+                min_bucket_reso, max_bucket_reso = self.adjust_min_max_bucket_reso_by_steps(
+                    resolution, min_bucket_reso, max_bucket_reso, bucket_reso_steps
+                )
+                self.min_bucket_reso = min_bucket_reso
+                self.max_bucket_reso = max_bucket_reso
             self.bucket_reso_steps = bucket_reso_steps
             self.bucket_no_upscale = bucket_no_upscale
         else:
