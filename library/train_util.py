@@ -1,5 +1,8 @@
 # common functions for training
 
+import os
+os.environ["TORCH_LOGS"] = "recompiles"
+
 import argparse
 import ast
 import asyncio
@@ -21,6 +24,7 @@ from typing import (
     Union,
 )
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
+from accelerate.utils import TorchDynamoPlugin
 import glob
 import math
 import os
@@ -4640,13 +4644,20 @@ def prepare_accelerator(args: argparse.Namespace):
     kwargs_handlers = list(filter(lambda x: x is not None, kwargs_handlers))
     deepspeed_plugin = deepspeed_utils.prepare_deepspeed_plugin(args)
 
+    dynamo_plugin = TorchDynamoPlugin(
+        backend=dynamo_backend,
+        mode="max-autotune-no-cudagraphs",
+        fullgraph=True,
+        dynamic=None,  # Attempt dynamic shapes after the first compilation
+        use_regional_compilation=True,
+    )
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=log_with,
         project_dir=logging_dir,
         kwargs_handlers=kwargs_handlers,
-        dynamo_backend=dynamo_backend,
+        dynamo_plugin=dynamo_plugin,
         deepspeed_plugin=deepspeed_plugin,
     )
     print("accelerator device:", accelerator.device)
