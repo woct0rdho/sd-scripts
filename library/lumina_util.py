@@ -13,12 +13,17 @@ from transformers import Gemma2Config, Gemma2Model
 from library.utils import setup_logging
 from library import lumina_models, flux_models
 from library.safetensors_utils import load_safetensors
+from library.lora_utils import load_safetensors_with_lora_and_fp8
+from library.fp8_optimization_utils import apply_fp8_monkey_patch
 import logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 MODEL_VERSION_LUMINA_V2 = "lumina2"
+
+FP8_OPTIMIZATION_TARGET_KEYS = ["layers", "context_refiner", "noise_refiner"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm"]
 
 
 def load_lumina_model(
@@ -28,6 +33,9 @@ def load_lumina_model(
     disable_mmap: bool = False,
     use_flash_attn: bool = False,
     use_sage_attn: bool = False,
+    fp8_scaled: bool = False,
+    lora_weights_list: Optional[dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[list[float]] = None,
 ):
     """
     Load the Lumina model from the checkpoint path.
@@ -42,6 +50,9 @@ def load_lumina_model(
     Returns:
         model (lumina_models.NextDiT): The loaded model.
     """
+    # dtype is None for fp8_scaled
+    assert (not fp8_scaled and dtype is not None) or (fp8_scaled and dtype is None)
+
     logger.info("Building Lumina")
     with torch.device("meta"):
         model = lumina_models.NextDiT_2B_GQA_patch2_Adaln_Refiner(use_flash_attn=use_flash_attn, use_sage_attn=use_sage_attn).to(
@@ -49,7 +60,17 @@ def load_lumina_model(
         )
 
     logger.info(f"Loading state dict from {ckpt_path}")
-    state_dict = load_safetensors(ckpt_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
+    state_dict = load_safetensors_with_lora_and_fp8(
+        model_files=ckpt_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=True,
+        dit_weight_dtype=dtype,
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+    )
 
     # Neta-Lumina support
     if "model.diffusion_model.cap_embedder.0.weight" in state_dict:
@@ -58,6 +79,9 @@ def load_lumina_model(
             k.replace("model.diffusion_model.", ""): v for k, v in state_dict.items() if k.startswith("model.diffusion_model.")
         }
         state_dict = filtered_state_dict
+
+    if fp8_scaled:
+        apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)
 
     info = model.load_state_dict(state_dict, strict=False, assign=True)
     logger.info(f"Loaded Lumina: {info}")
