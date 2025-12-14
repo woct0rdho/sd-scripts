@@ -1070,6 +1070,11 @@ def add_lumina_train_arguments(parser: argparse.ArgumentParser):
         help="Discrete flow shift for the Euler Discrete Scheduler, default is 6.0 / Euler Discrete Schedulerの離散フローシフト、デフォルトは6.0",
     )
     parser.add_argument(
+        "--fp8_scaled",
+        action="store_true",
+        help="Use scaled fp8 for NextDiT / NextDiTにスケーリングされたfp8を使う",
+    )
+    parser.add_argument(
         "--use_flash_attn",
         action="store_true",
         help="Use Flash Attention for the model / モデルにFlash Attentionを使用する",

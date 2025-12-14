@@ -50,7 +50,10 @@ class LuminaNetworkTrainer(train_network.NetworkTrainer):
         self.train_gemma2 = not args.network_train_unet_only
 
     def load_target_model(self, args, weight_dtype, accelerator):
-        loading_dtype = None if args.fp8_base else weight_dtype
+        if args.fp8_scaled and (args.fp8_base or args.fp8_base_unet):
+            raise ValueError("When fp8_scaled is used, do not use fp8_base or fp8_base_unet.")
+
+        loading_dtype = None if args.fp8_base or args.fp8_scaled else weight_dtype
 
         model = lumina_util.load_lumina_model(
             args.pretrained_model_name_or_path,
@@ -59,6 +62,7 @@ class LuminaNetworkTrainer(train_network.NetworkTrainer):
             disable_mmap=args.disable_mmap_load_safetensors,
             use_flash_attn=args.use_flash_attn,
             use_sage_attn=args.use_sage_attn,
+            fp8_scaled=args.fp8_scaled,
         )
 
         if args.fp8_base:

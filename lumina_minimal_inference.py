@@ -253,6 +253,11 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Use sage attention for Lumina model",
     )
     parser.add_argument(
+        "--fp8_scaled",
+        action="store_true",
+        help="Use scaled fp8 for NextDiT",
+    )
+    parser.add_argument(
         "--lora_weights",
         type=str,
         nargs="*",
@@ -277,6 +282,22 @@ if __name__ == "__main__":
     if args.device:
         device = torch.device(args.device)
 
+    # Load LoRA weights if fp8_scaled is used or if we want to merge them
+    lora_weights_list = []
+    lora_multipliers = []
+    if args.fp8_scaled and args.lora_weights:
+        logger.info("fp8_scaled is enabled, so LoRA weights will be merged into the model.")
+        for weights_file in args.lora_weights:
+            if ";" in weights_file:
+                weights_file, multiplier = weights_file.split(";")
+                multiplier = float(multiplier)
+            else:
+                multiplier = 1.0
+            
+            weights_sd = load_file(weights_file)
+            lora_weights_list.append(weights_sd)
+            lora_multipliers.append(multiplier)
+
     # Load Lumina DiT model
     model = lumina_util.load_lumina_model(
         args.pretrained_model_name_or_path,
@@ -284,6 +305,9 @@ if __name__ == "__main__":
         device="cpu",
         use_flash_attn=args.use_flash_attn,
         use_sage_attn=args.use_sage_attn,
+        fp8_scaled=args.fp8_scaled,
+        lora_weights_list=lora_weights_list if args.fp8_scaled else None,
+        lora_multipliers=lora_multipliers if args.fp8_scaled else None,
     )
 
     # Load Gemma2
@@ -292,29 +316,30 @@ if __name__ == "__main__":
     # Load Autoencoder
     ae = lumina_util.load_ae(args.ae_path, dtype=None, device="cpu")
 
-    # LoRA
+    # LoRA for non-fp8_scaled
     lora_models = []
-    for weights_file in args.lora_weights:
-        if ";" in weights_file:
-            weights_file, multiplier = weights_file.split(";")
-            multiplier = float(multiplier)
-        else:
-            multiplier = 1.0
+    if not args.fp8_scaled:
+        for weights_file in args.lora_weights:
+            if ";" in weights_file:
+                weights_file, multiplier = weights_file.split(";")
+                multiplier = float(multiplier)
+            else:
+                multiplier = 1.0
 
-        weights_sd = load_file(weights_file)
-        lora_model, _ = lora_lumina.create_network_from_weights(multiplier, None, ae, [gemma2], model, weights_sd, True)
+            weights_sd = load_file(weights_file)
+            lora_model, _ = lora_lumina.create_network_from_weights(multiplier, None, ae, [gemma2], model, weights_sd, True)
 
-        if args.merge_lora_weights:
-            lora_model.merge_to([gemma2], model, weights_sd)
-        else:
-            lora_model.apply_to([gemma2], model)
-            info = lora_model.load_state_dict(weights_sd, strict=True)
-            logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
-            lora_model.to(device)
-            lora_model.set_multiplier(multiplier)
-            lora_model.eval()
+            if args.merge_lora_weights:
+                lora_model.merge_to([gemma2], model, weights_sd)
+            else:
+                lora_model.apply_to([gemma2], model)
+                info = lora_model.load_state_dict(weights_sd, strict=True)
+                logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
+                lora_model.to(device)
+                lora_model.set_multiplier(multiplier)
+                lora_model.eval()
 
-        lora_models.append(lora_model)
+            lora_models.append(lora_model)
 
     if not args.interactive:
         generate_image(
