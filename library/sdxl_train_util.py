@@ -383,6 +383,33 @@ def add_sdxl_compile_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
     )
+    parser.add_argument(
+        "--cuda_allow_tf32",
+        action="store_true",
+        help="Allow TF32 on Ampere or higher GPUs / Ampere以降のGPUでTF32を許可する",
+    )
+    parser.add_argument(
+        "--cuda_cudnn_benchmark",
+        action="store_true",
+        help="Enable cudnn benchmark for possibly faster training / cudnnのベンチマークを有効にして学習の高速化を図る",
+    )
+
+
+def apply_cuda_performance_options(args: argparse.Namespace):
+    if not torch.cuda.is_available():
+        return
+
+    if args.cuda_allow_tf32:
+        torch.set_float32_matmul_precision("high")
+        torch.backends.fp32_precision = "tf32"
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.fp32_precision = "tf32"
+        logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+
+    if args.cuda_cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+        logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
 
 
 def compile_sdxl_unet(args: argparse.Namespace, unet: sdxl_original_unet.SdxlUNet2DConditionModel):

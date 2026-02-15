@@ -23,6 +23,10 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
         self.is_sdxl = True
 
+    def train(self, args):
+        sdxl_train_util.apply_cuda_performance_options(args)
+        super().train(args)
+
     def assert_extra_args(
         self,
         args,
