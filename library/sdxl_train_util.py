@@ -345,6 +345,73 @@ def add_sdxl_training_arguments(parser: argparse.ArgumentParser, support_text_en
     )
 
 
+def add_sdxl_compile_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (requires Triton) / torch.compileを有効にする（Tritonが必要）",
+    )
+    parser.add_argument(
+        "--compile_backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend (default: inductor) / torch.compileのバックエンド（デフォルト: inductor）",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode (default: default) / torch.compileのモード（デフォルト: default）",
+    )
+    parser.add_argument(
+        "--compile_dynamic",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
+    )
+    parser.add_argument(
+        "--compile_fullgraph",
+        action="store_true",
+        help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+
+
+def compile_sdxl_unet(args: argparse.Namespace, unet: sdxl_original_unet.SdxlUNet2DConditionModel):
+    compile_dynamic = None
+    if args.compile_dynamic is not None:
+        compile_dynamic = {"true": True, "false": False, "auto": None}[args.compile_dynamic.lower()]
+
+    if args.compile_cache_size_limit is not None:
+        torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+
+    logger.info(
+        f"Compiling SDXL U-Net with torch.compile: backend={args.compile_backend}, mode={args.compile_mode}, "
+        + f"dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
+    )
+
+    block_groups = list(unet.input_blocks) + [unet.middle_block] + list(unet.output_blocks) + [unet.out]
+    for block in block_groups:
+        for i, layer in enumerate(block):
+            block[i] = torch.compile(
+                layer,
+                backend=args.compile_backend,
+                mode=args.compile_mode,
+                dynamic=compile_dynamic,
+                fullgraph=args.compile_fullgraph,
+            )
+
+    return unet
+
+
 def verify_sdxl_training_args(args: argparse.Namespace, support_text_encoder_caching: bool = True):
     assert not args.v2, "v2 cannot be enabled in SDXL training / SDXL学習ではv2を有効にすることはできません"
 
