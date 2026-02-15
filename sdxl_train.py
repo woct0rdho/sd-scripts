@@ -121,6 +121,9 @@ def train(args):
     cache_latents = args.cache_latents
     use_dreambooth_method = args.in_json is None
 
+    if args.compile and args.deepspeed:
+        raise ValueError("--compile is not supported with --deepspeed in SDXL training")
+
     if args.seed is not None:
         set_seed(args.seed)  # 乱数系列を初期化する
 
@@ -499,6 +502,12 @@ def train(args):
         if train_text_encoder2:
             text_encoder2 = accelerator.prepare(text_encoder2)
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
+
+    if args.compile:
+        if train_unet:
+            unet = sdxl_train_util.compile_sdxl_unet(args, accelerator.unwrap_model(unet))
+        else:
+            logger.warning("--compile is enabled but U-Net is not trained, so torch.compile is skipped")
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
@@ -903,6 +912,7 @@ def setup_parser() -> argparse.ArgumentParser:
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
     sdxl_train_util.add_sdxl_training_arguments(parser)
+    sdxl_train_util.add_sdxl_compile_arguments(parser)
 
     parser.add_argument(
         "--learning_rate_te1",

@@ -4051,7 +4051,10 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="use memory efficient attention for CrossAttention / CrossAttentionに省メモリ版attentionを使う",
     )
     parser.add_argument(
-        "--torch_compile", action="store_true", help="use torch.compile (requires PyTorch 2.0) / torch.compile を使う"
+        "--torch_compile",
+        action="store_true",
+        help="[Deprecated] no longer used by TorchDynamoPlugin. Use script-level --compile options instead / "
+        + "[非推奨] TorchDynamoPluginでは使用されません。各スクリプトの--compileオプションを使用してください",
     )
     parser.add_argument(
         "--dynamo_backend",
@@ -4074,7 +4077,8 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
             "ipex",
             "tvm",
         ],
-        help="dynamo backend type (default is inductor) / dynamoのbackendの種類（デフォルトは inductor）",
+        help="[Deprecated] dynamo backend type, ignored unless legacy workflows still reference it"
+        + " / [非推奨] dynamoのbackendの種類。レガシー互換以外では無視されます",
     )
     parser.add_argument("--xformers", action="store_true", help="use xformers for CrossAttention / CrossAttentionにxformersを使う")
     parser.add_argument(
@@ -5610,10 +5614,13 @@ def prepare_accelerator(args: argparse.Namespace):
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
 
-    # torch.compile のオプション。 NO の場合は torch.compile は使わない
+    # TorchDynamoPluginでのtorch.compileは非推奨。個別スクリプト側の--compileを使用する
     dynamo_backend = "NO"
     if args.torch_compile:
-        dynamo_backend = args.dynamo_backend
+        logger.warning(
+            "--torch_compile is deprecated and ignored. Use script-level --compile options instead / "
+            + "--torch_compileは非推奨で無視されます。代わりに各スクリプトの--compileオプションを使用してください"
+        )
 
     kwargs_handlers = [
         (
@@ -6560,11 +6567,33 @@ def sample_images_common(
     vae.to(distributed_state.device)  # distributed_state.device is same as accelerator.device
 
     # unwrap unet and text_encoder(s)
-    unet = accelerator.unwrap_model(unet_wrapped)
+    def unwrap_model_for_sampling(model):
+        try:
+            return accelerator.unwrap_model(model)
+        except KeyError as e:
+            if "_orig_mod" not in str(e):
+                raise
+            logger.warning(
+                "accelerate.unwrap_model failed due to missing _orig_mod; applying manual unwrap fallback"
+            )
+            unwrapped = model
+
+            parallel_wrappers = (torch.nn.parallel.DistributedDataParallel, torch.nn.DataParallel)
+
+            while isinstance(unwrapped, parallel_wrappers):
+                unwrapped = unwrapped.module
+
+            # keep compatibility with torch.compile wrapped model if present
+            if hasattr(unwrapped, "_orig_mod"):
+                unwrapped = unwrapped._orig_mod
+
+            return unwrapped
+
+    unet = unwrap_model_for_sampling(unet_wrapped)
     if isinstance(text_encoder, (list, tuple)):
-        text_encoder = [accelerator.unwrap_model(te) for te in text_encoder]
+        text_encoder = [unwrap_model_for_sampling(te) for te in text_encoder]
     else:
-        text_encoder = accelerator.unwrap_model(text_encoder)
+        text_encoder = unwrap_model_for_sampling(text_encoder)
 
     # read prompts
     if args.sample_prompts.endswith(".txt"):
