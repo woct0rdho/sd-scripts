@@ -1089,9 +1089,10 @@ class SdxlUNet2DConditionModel(nn.Module):
             x = h
             for layer in module:
                 # logger.info(layer.__class__.__name__, x.dtype, emb.dtype, context.dtype if context is not None else None)
-                if isinstance(layer, ResnetBlock2D):
+                layer_for_type_check = layer._orig_mod if hasattr(layer, "_orig_mod") else layer
+                if isinstance(layer_for_type_check, ResnetBlock2D):
                     x = layer(x, emb)
-                elif isinstance(layer, Transformer2DModel):
+                elif isinstance(layer_for_type_check, Transformer2DModel):
                     x = layer(x, context)
                 else:
                     x = layer(x)
@@ -1179,9 +1180,10 @@ class InferSdxlUNet2DConditionModel:
             x = h
             for layer in module:
                 # print(layer.__class__.__name__, x.dtype, emb.dtype, context.dtype if context is not None else None)
-                if isinstance(layer, ResnetBlock2D):
+                layer_for_type_check = layer._orig_mod if hasattr(layer, "_orig_mod") else layer
+                if isinstance(layer_for_type_check, ResnetBlock2D):
                     x = layer(x, emb)
-                elif isinstance(layer, Transformer2DModel):
+                elif isinstance(layer_for_type_check, Transformer2DModel):
                     x = layer(x, context)
                 else:
                     x = layer(x)

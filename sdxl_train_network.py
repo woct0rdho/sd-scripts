@@ -31,6 +31,9 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
     ):
         sdxl_train_util.verify_sdxl_training_args(args)
 
+        if args.compile and args.deepspeed:
+            raise ValueError("--compile is not supported with --deepspeed in SDXL network training")
+
         if args.cache_text_encoder_outputs:
             assert (
                 train_dataset_group.is_text_encoder_output_cacheable()
@@ -216,10 +219,19 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         sdxl_train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
 
+    def prepare_unet_with_accelerator(
+        self, args: argparse.Namespace, accelerator: Accelerator, unet: torch.nn.Module
+    ) -> torch.nn.Module:
+        unet = super().prepare_unet_with_accelerator(args, accelerator, unet)
+        if args.compile:
+            sdxl_train_util.compile_sdxl_unet(args, accelerator.unwrap_model(unet))
+        return unet
+
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = train_network.setup_parser()
     sdxl_train_util.add_sdxl_training_arguments(parser)
+    sdxl_train_util.add_sdxl_compile_arguments(parser)
     return parser
 
 
