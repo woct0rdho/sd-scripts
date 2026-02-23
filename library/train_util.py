@@ -2553,7 +2553,6 @@ class ControlNetDataset(BaseDataset):
 
     def make_buckets(self):
         self.dreambooth_dataset_delegate.make_buckets()
-
         self.bucket_manager = self.dreambooth_dataset_delegate.bucket_manager
         self.buckets_indices = self.dreambooth_dataset_delegate.buckets_indices
 
