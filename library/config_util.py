@@ -108,7 +108,7 @@ class BaseDatasetParams:
     validation_seed: Optional[int] = None
     validation_split: float = 0.0
     resize_interpolation: Optional[str] = None
-    skip_image_resolution: float = 0.0
+    skip_image_resolution: Optional[Tuple[int, int]] = None
 
 @dataclass
 class DreamBoothDatasetParams(BaseDatasetParams):
@@ -245,7 +245,7 @@ class ConfigSanitizer:
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "network_multiplier": float,
         "resize_interpolation": str,
-        "skip_image_resolution": Any(float, int),
+        "skip_image_resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
     }
 
     # options handled by argparse but not handled by user config
