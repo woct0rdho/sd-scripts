@@ -88,6 +88,26 @@ SVD_METHODS = ("merged", "qr")
 DEFAULT_SVD_LOWRANK_NITER = 2
 
 
+def _zero_svd(out_size, in_size, lora_rank, device, dtype):
+    U = torch.zeros((out_size, lora_rank), device=device, dtype=dtype)
+    S = torch.zeros((lora_rank,), device=device, dtype=dtype)
+    Vh = torch.zeros((lora_rank, in_size), device=device, dtype=dtype)
+    return U, S, Vh
+
+
+def _svd(weight, lora_rank, svd_lowrank_niter):
+    out_size, in_size = weight.size()
+    try:
+        if svd_lowrank_niter > 0 and out_size > 2048 and in_size > 2048:
+            U, S, V = torch.svd_lowrank(weight, q=min(2 * lora_rank, out_size, in_size), niter=svd_lowrank_niter)
+            Vh = V.T
+        else:
+            U, S, Vh = torch.linalg.svd(weight)
+    except torch._C._LinAlgError:
+        U, S, Vh = _zero_svd(out_size, in_size, lora_rank, weight.device, weight.dtype)
+    return U, S, Vh
+
+
 def svd_merged(lora_down, lora_up, lora_rank, device, svd_lowrank_niter=DEFAULT_SVD_LOWRANK_NITER):
     """SVD of the materialized product lora_up @ lora_down (the original method).
 
@@ -97,15 +117,9 @@ def svd_merged(lora_down, lora_up, lora_rank, device, svd_lowrank_niter=DEFAULT_
     lora_up = lora_up.to(device)
 
     weight = lora_up @ lora_down  # (out, in)
-    out_size, in_size = weight.size()
     del lora_up, lora_down
 
-    if svd_lowrank_niter > 0 and out_size > 2048 and in_size > 2048:
-        U, S, V = torch.svd_lowrank(weight, q=min(2 * lora_rank, out_size, in_size), niter=svd_lowrank_niter)
-        Vh = V.T
-    else:
-        U, S, Vh = torch.linalg.svd(weight)
-    return U, S, Vh
+    return _svd(weight, lora_rank, svd_lowrank_niter)
 
 
 def svd_qr(lora_down, lora_up, lora_rank, device):
@@ -120,17 +134,21 @@ def svd_qr(lora_down, lora_up, lora_rank, device):
     """
     lora_down = lora_down.to(device)
     lora_up = lora_up.to(device)
+    out_size, in_size = lora_up.shape[0], lora_down.shape[1]
 
-    Q, R = torch.linalg.qr(lora_up)  # Q: (out, k), R: (k, rank), k = min(out, rank)
-    C = R @ lora_down  # C: (k, in)
-    U, S, Vh = torch.linalg.svd(C, full_matrices=False)  # U: (k, m), S: (m,), Vh: (m, in), m = min(k, in)
-    U = Q @ U
+    try:
+        Q, R = torch.linalg.qr(lora_up)  # Q: (out, k), R: (k, rank), k = min(out, rank)
+        C = R @ lora_down  # C: (k, in)
+        U, S, Vh = torch.linalg.svd(C, full_matrices=False)  # U: (k, m), S: (m,), Vh: (m, in), m = min(k, in)
+        U = Q @ U
 
-    num_pad = min(lora_rank, Vh.shape[1]) - len(S)
-    if num_pad > 0:
-        U = torch.cat([U, U.new_zeros(U.shape[0], num_pad)], dim=1)
-        S = torch.cat([S, S.new_zeros(num_pad)])
-        Vh = torch.cat([Vh, orthonormal_complement_rows(Vh, num_pad)], dim=0)
+        num_pad = min(lora_rank, Vh.shape[1]) - len(S)
+        if num_pad > 0:
+            U = torch.cat([U, U.new_zeros(U.shape[0], num_pad)], dim=1)
+            S = torch.cat([S, S.new_zeros(num_pad)])
+            Vh = torch.cat([Vh, orthonormal_complement_rows(Vh, num_pad)], dim=0)
+    except torch._C._LinAlgError:
+        U, S, Vh = _zero_svd(out_size, in_size, lora_rank, lora_down.device, lora_down.dtype)
     return U, S, Vh
 
 
