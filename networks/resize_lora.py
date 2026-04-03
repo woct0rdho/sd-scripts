@@ -84,17 +84,27 @@ def index_sv_ratio(S, target):
     return index
 
 
+def _svd(weight, lora_rank, svd_lowrank_niter):
+    out_size, in_size = weight.size()
+    try:
+        if svd_lowrank_niter > 0 and out_size > 2048 and in_size > 2048:
+            U, S, V = torch.svd_lowrank(weight, q=min(2 * lora_rank, out_size, in_size), niter=svd_lowrank_niter)
+            Vh = V.T
+        else:
+            U, S, Vh = torch.linalg.svd(weight)
+    except torch._C._LinAlgError:
+        U = torch.zeros((out_size, lora_rank), device=weight.device, dtype=weight.dtype)
+        S = torch.zeros((lora_rank,), device=weight.device, dtype=weight.dtype)
+        Vh = torch.zeros((lora_rank, in_size), device=weight.device, dtype=weight.dtype)
+    return U, S, Vh
+
+
 # Modified from Kohaku-blueleaf's extract/merge functions
 def extract_conv(weight, lora_rank, dynamic_method, dynamic_param, device, scale=1, svd_lowrank_niter=2):
     out_size, in_size, kernel_size, _ = weight.size()
     weight = weight.reshape(out_size, -1)
-    _in_size = in_size * kernel_size * kernel_size
 
-    if svd_lowrank_niter > 0 and out_size > 2048 and _in_size > 2048:
-        U, S, V = torch.svd_lowrank(weight.to(device), q=min(2 * lora_rank, out_size, _in_size), niter=svd_lowrank_niter)
-        Vh = V.T
-    else:
-        U, S, Vh = torch.linalg.svd(weight.to(device))
+    U, S, Vh = _svd(weight.to(device), lora_rank, svd_lowrank_niter)
 
     param_dict = rank_resize(S, lora_rank, dynamic_method, dynamic_param, scale)
     lora_rank = param_dict["new_rank"]
@@ -113,11 +123,7 @@ def extract_conv(weight, lora_rank, dynamic_method, dynamic_param, device, scale
 def extract_linear(weight, lora_rank, dynamic_method, dynamic_param, device, scale=1, svd_lowrank_niter=2):
     out_size, in_size = weight.size()
 
-    if svd_lowrank_niter > 0 and out_size > 2048 and in_size > 2048:
-        U, S, V = torch.svd_lowrank(weight.to(device), q=min(2 * lora_rank, out_size, in_size), niter=svd_lowrank_niter)
-        Vh = V.T
-    else:
-        U, S, Vh = torch.linalg.svd(weight.to(device))
+    U, S, Vh = _svd(weight.to(device), lora_rank, svd_lowrank_niter)
 
     param_dict = rank_resize(S, lora_rank, dynamic_method, dynamic_param, scale)
     lora_rank = param_dict["new_rank"]
