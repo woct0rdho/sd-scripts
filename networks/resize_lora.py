@@ -87,7 +87,7 @@ def index_sv_ratio(S, target):
 def _svd(weight, lora_rank, svd_lowrank_niter):
     out_size, in_size = weight.size()
     try:
-        if svd_lowrank_niter > 0 and out_size > 2048 and in_size > 2048:
+        if svd_lowrank_niter > 0 and out_size > 1024 and in_size > 1024:
             U, S, V = torch.svd_lowrank(weight, q=min(2 * lora_rank, out_size, in_size), niter=svd_lowrank_niter)
             Vh = V.T
         else:
@@ -431,8 +431,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--svd_lowrank_niter",
         type=int,
         default=2,
-        help="Number of iterations for svd_lowrank on large matrices (>2048 dims). 0 to disable and use full SVD"
-        " / 大行列(2048次元超)に対するsvd_lowrankの反復回数。0で無効化し完全SVDを使用",
+        help="Number of iterations for svd_lowrank on large matrices (>1024 dims). 0 to disable and use full SVD"
+        " / 大行列(1024次元超)に対するsvd_lowrankの反復回数。0で無効化し完全SVDを使用",
     )
 
     return parser
