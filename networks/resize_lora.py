@@ -171,6 +171,7 @@ def merge_linear(lora_down, lora_up, device):
 
 def rank_resize(S, rank, dynamic_method, dynamic_param, scale=1):
     param_dict = {}
+    max_rank = min(rank, len(S))
 
     if dynamic_method == "sv_ratio":
         # Calculate new dim and alpha based off ratio
@@ -193,8 +194,8 @@ def rank_resize(S, rank, dynamic_method, dynamic_param, scale=1):
     if S[0] <= MIN_SV:  # Zero matrix, set dim to 1
         new_rank = 1
         new_alpha = float(scale * new_rank)
-    elif new_rank > rank:  # cap max rank at rank
-        new_rank = rank
+    elif new_rank > max_rank:  # cap max rank at requested rank and available singular values
+        new_rank = max_rank
         new_alpha = float(scale * new_rank)
 
     # Calculate resize info
@@ -270,6 +271,8 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
                 conv2d = len(lora_down_weight.size()) == 4
                 old_rank = lora_down_weight.size()[0]
                 max_old_rank = max(max_old_rank or 0, old_rank)
+                requested_rank = new_conv_rank if conv2d else new_rank
+                target_rank = min(requested_rank, old_rank)
 
                 if lora_alpha is None:
                     scale = 1.0
@@ -278,10 +281,10 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
 
                 if conv2d:
                     full_weight_matrix = merge_conv(lora_down_weight, lora_up_weight, device)
-                    param_dict = extract_conv(full_weight_matrix, new_conv_rank, dynamic_method, dynamic_param, device, scale, svd_lowrank_niter)
+                    param_dict = extract_conv(full_weight_matrix, target_rank, dynamic_method, dynamic_param, device, scale, svd_lowrank_niter)
                 else:
                     full_weight_matrix = merge_linear(lora_down_weight, lora_up_weight, device)
-                    param_dict = extract_linear(full_weight_matrix, new_rank, dynamic_method, dynamic_param, device, scale, svd_lowrank_niter)
+                    param_dict = extract_linear(full_weight_matrix, target_rank, dynamic_method, dynamic_param, device, scale, svd_lowrank_niter)
 
                 if verbose:
                     max_ratio = param_dict["max_ratio"]
@@ -296,6 +299,8 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
                     )
                     if dynamic_method:
                         verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}"
+                    if target_rank != requested_rank:
+                        verbose_str += f", capped dim: {target_rank}"
                     tqdm.write(verbose_str)
 
                 new_alpha = param_dict["new_alpha"]
