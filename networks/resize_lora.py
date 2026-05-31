@@ -359,6 +359,8 @@ def resize_lora_model(
                 conv2d = len(lora_down_weight.size()) == 4
                 old_rank = lora_down_weight.size()[0]
                 max_old_rank = max(max_old_rank or 0, old_rank)
+                requested_rank = new_conv_rank if conv2d else new_rank
+                target_rank = min(requested_rank, old_rank)
 
                 if lora_alpha is None:
                     scale = 1.0
@@ -369,7 +371,7 @@ def resize_lora_model(
                     param_dict = extract_conv(
                         lora_down_weight,
                         lora_up_weight,
-                        new_conv_rank,
+                        target_rank,
                         dynamic_method,
                         dynamic_param,
                         device,
@@ -381,7 +383,7 @@ def resize_lora_model(
                     param_dict = extract_linear(
                         lora_down_weight,
                         lora_up_weight,
-                        new_rank,
+                        target_rank,
                         dynamic_method,
                         dynamic_param,
                         device,
@@ -403,6 +405,8 @@ def resize_lora_model(
                     )
                     if dynamic_method:
                         verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}"
+                    if target_rank != requested_rank:
+                        verbose_str += f", capped dim: {target_rank}"
                     tqdm.write(verbose_str)
 
                 new_alpha = param_dict["new_alpha"]
