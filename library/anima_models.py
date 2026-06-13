@@ -1333,7 +1333,9 @@ class Anima(nn.Module):
         if timesteps_B_T.ndim == 1:
             timesteps_B_T = timesteps_B_T.unsqueeze(1)
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
-        t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
+        t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D).to(dtype=x_B_T_H_W_D.dtype)
+        if adaln_lora_B_T_3D is not None:
+            adaln_lora_B_T_3D = adaln_lora_B_T_3D.to(dtype=x_B_T_H_W_D.dtype)
 
         block_kwargs = {
             "rope_emb_L_1_1_D": rope_emb_L_1_1_D,
