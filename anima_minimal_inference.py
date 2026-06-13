@@ -290,8 +290,7 @@ def load_dit_model(
 
         model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # model.to(device)
-    model.to(device, dtype=torch.bfloat16)  # ensure model is in bfloat16 for inference
+    model.to(device)
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
@@ -568,7 +567,7 @@ def generate_body(
 
     # Denoising loop
     do_cfg = args.guidance_scale != 1.0
-    autocast_enabled = args.fp8
+    autocast_enabled = args.fp8 or args.fp8_scaled
 
     with tqdm(total=len(timesteps), desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
