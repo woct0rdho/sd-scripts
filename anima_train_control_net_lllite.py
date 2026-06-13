@@ -881,12 +881,13 @@ def train(args):
                 optimizer_train_fn()
 
             current_loss = loss.detach().item()
-            if len(accelerator.trackers) > 0:
-                logs = {"loss": current_loss, "lr": lr_scheduler.get_last_lr()[0]}
-                accelerator.log(logs, step=global_step)
-
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average
+            if len(accelerator.trackers) > 0:
+                logs = {"loss/current": current_loss, "loss/average": avr_loss}
+                optimizer_util.append_lr_to_logs_with_names(logs, lr_scheduler, args.optimizer_type, [])
+                accelerator.log(logs, step=global_step)
+
             progress_bar.set_postfix(**{"avr_loss": avr_loss})
 
             if global_step >= args.max_train_steps:
