@@ -64,11 +64,8 @@ def generate_step_logs(args: argparse.Namespace, current_loss, avr_loss, lr_sche
     logs = {
         "loss/current": current_loss,
         "loss/average": avr_loss,
-        "lr": lr_scheduler.get_last_lr()[0],
     }
-
-    if args.optimizer_type.lower().startswith("DAdapt".lower()):
-        logs["lr/d*lr"] = lr_scheduler.optimizers[-1].param_groups[0]["d"] * lr_scheduler.optimizers[-1].param_groups[0]["lr"]
+    optimizer_util.append_lr_to_logs_with_names(logs, lr_scheduler, args.optimizer_type, [])
 
     return logs
 
