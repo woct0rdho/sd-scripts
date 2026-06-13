@@ -18,6 +18,7 @@ from diffusers import DDPMScheduler
 from diffusers.utils.torch_utils import is_compiled_module
 from safetensors.torch import load_file
 from library import (
+    attention as attention_util,
     deepspeed_utils,
     sai_model_spec,
     sdxl_model_util,
@@ -58,6 +59,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+FLASH_ATTN_TEXT_ENCODER_IMPLEMENTATION = "flash_attention_2"
+
 
 # TODO 他のスクリプトと共通化する
 def generate_step_logs(args: argparse.Namespace, current_loss, avr_loss, lr_scheduler):
@@ -68,6 +71,23 @@ def generate_step_logs(args: argparse.Namespace, current_loss, avr_loss, lr_sche
     optimizer_util.append_lr_to_logs_with_names(logs, lr_scheduler, args.optimizer_type, [])
 
     return logs
+
+
+def verify_flash_attn_args(args: argparse.Namespace, weight_dtype: torch.dtype) -> None:
+    if not getattr(args, "flash_attn", False):
+        return
+
+    enabled = [name for name in ("xformers", "sdpa", "mem_eff_attn") if getattr(args, name, False)]
+    if enabled:
+        raise ValueError(f"--flash_attn cannot be used together with: {', '.join('--' + name for name in enabled)}")
+    if weight_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("--flash_attn requires --mixed_precision fp16 or bf16")
+    if not attention_util.is_flash_attn_available():
+        raise ImportError("--flash_attn requires a usable flash-attn CUDA/ROCm extension")
+
+
+def set_text_encoder_attn_implementation(text_encoder: torch.nn.Module, implementation: str) -> None:
+    attention_util.set_transformers_attn_implementation(text_encoder, implementation)
 
 
 def train(args):
@@ -164,6 +184,7 @@ def train(args):
 
     # mixed precisionに対応した型を用意しておき適宜castする
     weight_dtype, save_dtype = accelerator_setup.prepare_dtype(args)
+    verify_flash_attn_args(args, weight_dtype)
     vae_dtype = torch.float32 if args.no_half_vae else weight_dtype
 
     # モデルを読み込む
@@ -176,6 +197,10 @@ def train(args):
         logit_scale,
         ckpt_info,
     ) = sdxl_train_util.load_target_model(args, accelerator, sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, weight_dtype)
+    text_encoder_attn_implementations = [
+        attention_util.get_transformers_attn_implementation(text_encoder1),
+        attention_util.get_transformers_attn_implementation(text_encoder2),
+    ]
 
     unet.to(accelerator.device)  # reduce main memory usage
 
@@ -232,10 +257,21 @@ def train(args):
         )
         strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_output_caching_strategy)
 
-        text_encoder1.to(accelerator.device)
-        text_encoder2.to(accelerator.device)
+        if args.flash_attn:
+            text_encoder1.to(accelerator.device, dtype=weight_dtype)
+            text_encoder2.to(accelerator.device, dtype=weight_dtype)
+            set_text_encoder_attn_implementation(text_encoder1, FLASH_ATTN_TEXT_ENCODER_IMPLEMENTATION)
+            set_text_encoder_attn_implementation(text_encoder2, FLASH_ATTN_TEXT_ENCODER_IMPLEMENTATION)
+            logger.info("enabled FlashAttention 2 for SDXL text encoder output caching")
+        else:
+            text_encoder1.to(accelerator.device)
+            text_encoder2.to(accelerator.device)
         with accelerator.autocast():
             train_dataset_group.new_cache_text_encoder_outputs([text_encoder1, text_encoder2], accelerator)
+
+        if args.flash_attn:
+            set_text_encoder_attn_implementation(text_encoder1, text_encoder_attn_implementations[0] or "sdpa")
+            set_text_encoder_attn_implementation(text_encoder2, text_encoder_attn_implementations[1] or "sdpa")
 
         accelerator.wait_for_everyone()
 
@@ -247,6 +283,10 @@ def train(args):
     elif args.sdpa:
         unet.set_use_sdpa(True)
         control_net.set_use_sdpa(True)
+    elif args.flash_attn:
+        unet.set_use_flash_attn(True)
+        control_net.set_use_flash_attn(True)
+        logger.info("enabled FlashAttention 2 for SDXL U-Net and ControlNet")
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -356,8 +396,15 @@ def train(args):
         clean_memory_on_device(accelerator.device)
     else:
         # make sure Text Encoders are on GPU
-        text_encoder1.to(accelerator.device)
-        text_encoder2.to(accelerator.device)
+        if args.flash_attn:
+            text_encoder1.to(accelerator.device, dtype=weight_dtype)
+            text_encoder2.to(accelerator.device, dtype=weight_dtype)
+            set_text_encoder_attn_implementation(text_encoder1, FLASH_ATTN_TEXT_ENCODER_IMPLEMENTATION)
+            set_text_encoder_attn_implementation(text_encoder2, FLASH_ATTN_TEXT_ENCODER_IMPLEMENTATION)
+            logger.info("enabled FlashAttention 2 for SDXL text encoders")
+        else:
+            text_encoder1.to(accelerator.device)
+            text_encoder2.to(accelerator.device)
 
     if not cache_latents:
         vae.requires_grad_(False)
@@ -500,7 +547,7 @@ def train(args):
                         encoder_hidden_states1, encoder_hidden_states2, pool2 = text_encoding_strategy.encode_tokens(
                             tokenize_strategy, [text_encoder1, text_encoder2, unwrap_model(text_encoder2)], [input_ids1, input_ids2]
                         )
-                        if args.full_fp16:
+                        if weight_dtype != torch.float32:
                             encoder_hidden_states1 = encoder_hidden_states1.to(weight_dtype)
                             encoder_hidden_states2 = encoder_hidden_states2.to(weight_dtype)
                             pool2 = pool2.to(weight_dtype)
@@ -518,6 +565,8 @@ def train(args):
                 # Sample noise, sample a random timestep for each image, and add noise to the latents,
                 # with noise offset and/or multires noise if specified
                 noise, noisy_latents, timesteps = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                if noisy_latents.dtype != weight_dtype:
+                    noisy_latents = noisy_latents.to(dtype=weight_dtype)
 
                 controlnet_image = batch["conditioning_images"].to(dtype=weight_dtype)
 
@@ -709,6 +758,11 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1e-4,
         help="learning rate for controlnet modules / controlnetモジュールの学習率",
+    )
+    parser.add_argument(
+        "--flash_attn",
+        action="store_true",
+        help="Use FlashAttention 2 for SDXL text encoders, U-Net, and ControlNet. Requires flash-attn and fp16/bf16 training.",
     )
     return parser
 
