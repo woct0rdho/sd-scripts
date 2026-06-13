@@ -676,7 +676,9 @@ def _sample_image_inference(
         t5_input_ids = torch.from_numpy(t5_input_ids).unsqueeze(0)
         t5_attn_mask = torch.from_numpy(t5_attn_mask).unsqueeze(0)
 
-    prompt_embeds = prompt_embeds.to(accelerator.device, dtype=dit.dtype)
+    compute_dtype = torch.bfloat16 if getattr(args, "fp8_scaled", False) else dit.dtype
+
+    prompt_embeds = prompt_embeds.to(accelerator.device, dtype=compute_dtype)
     attn_mask = attn_mask.to(accelerator.device)
     t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
     t5_attn_mask = t5_attn_mask.to(accelerator.device)
@@ -705,7 +707,7 @@ def _sample_image_inference(
                 neg_t5_ids = torch.from_numpy(neg_t5_ids).unsqueeze(0)
                 neg_t5_am = torch.from_numpy(neg_t5_am).unsqueeze(0)
 
-            neg_pe = neg_pe.to(accelerator.device, dtype=dit.dtype)
+            neg_pe = neg_pe.to(accelerator.device, dtype=compute_dtype)
             neg_am = neg_am.to(accelerator.device)
             neg_t5_ids = neg_t5_ids.to(accelerator.device, dtype=torch.long)
             neg_t5_am = neg_t5_am.to(accelerator.device)
@@ -724,7 +726,7 @@ def _sample_image_inference(
     # Generate sample
     clean_memory_on_device(accelerator.device)
     latents = do_sample(
-        height, width, seed, dit, crossattn_emb, sample_steps, dit.dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
+        height, width, seed, dit, crossattn_emb, sample_steps, compute_dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
     )
 
     # Decode latents

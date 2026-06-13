@@ -51,7 +51,6 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             logger.warning("fp8_base and fp8_base_unet are not supported. / fp8_baseとfp8_base_unetはサポートされていません。")
             args.fp8_base = False
             args.fp8_base_unet = False
-        args.fp8_scaled = False  # Anima DiT does not support fp8_scaled
 
         if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:
             logger.warning("cache_text_encoder_outputs_to_disk is enabled, so cache_text_encoder_outputs is also enabled")
@@ -280,15 +279,18 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         is_train=True,
     ):
         anima: anima_models.Anima = unet
+        compute_dtype = torch.bfloat16 if args.fp8_scaled else weight_dtype
 
         # Sample noise
         if latents.ndim == 5:  # Fallback for 5D latents (old cache)
             latents = latents.squeeze(2)  # [B, C, 1, H, W] -> [B, C, H, W]
+        if args.fp8_scaled:
+            latents = latents.to(dtype=compute_dtype)
         noise = torch.randn_like(latents)
 
         # Get noisy model input and timesteps
         noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
+            args, noise_scheduler, latents, noise, accelerator.device, compute_dtype
         )
         timesteps = timesteps / 1000.0  # scale to [0, 1] range. timesteps is float32
 
@@ -305,7 +307,7 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         ]  # ignore caption_dropout_rate which is not needed for training step
 
         # Move to device
-        prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
+        prompt_embeds = prompt_embeds.to(accelerator.device, dtype=compute_dtype)
         attn_mask = attn_mask.to(accelerator.device)
         t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
         t5_attn_mask = t5_attn_mask.to(accelerator.device)
@@ -314,7 +316,7 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         bs = latents.shape[0]
         h_latent = latents.shape[-2]
         w_latent = latents.shape[-1]
-        padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=weight_dtype, device=accelerator.device)
+        padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=compute_dtype, device=accelerator.device)
 
         # Call model
         noisy_model_input = noisy_model_input.unsqueeze(2)  # 4D to 5D, [B, C, H, W] -> [B, C, 1, H, W]
@@ -413,6 +415,9 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         first_param = next(text_encoder.parameters())
         first_param.requires_grad_(True)
 
+    def cast_unet(self, args):
+        return not args.fp8_scaled
+
     def prepare_unet_with_accelerator(
         self, args: argparse.Namespace, accelerator: Accelerator, unet: torch.nn.Module
     ) -> torch.nn.Module:
@@ -450,7 +455,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = train_network.setup_parser()
     args_util.add_dit_training_arguments(parser)
     anima_train_utils.add_anima_training_arguments(parser)
-    # parser.add_argument("--fp8_scaled", action="store_true", help="Use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
+    parser.add_argument("--fp8_scaled", action="store_true", help="Use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument(
         "--unsloth_offload_checkpointing",
         action="store_true",

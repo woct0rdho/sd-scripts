@@ -308,6 +308,9 @@ def train(args):
     assert not args.fused_backward_pass, (
         "fused_backward_pass is not supported in Anima ControlNet-LLLite training (MVP)"
     )
+    if args.fp8_scaled and args.fp8_base:
+        logger.info("fp8_scaled is used, so fp8_base is ignored")
+        args.fp8_base = False
 
     # per-block torch.compile の排他チェック (anima_train_network.assert_extra_args と同等)
     if args.compile:
@@ -473,8 +476,15 @@ def train(args):
 
     # DiT (frozen)
     logger.info("Loading Anima DiT...")
+    loading_dtype = None if args.fp8_scaled else weight_dtype
     dit = anima_utils.load_anima_model(
-        "cpu", args.pretrained_model_name_or_path, args.attn_mode, args.split_attn, "cpu", dit_weight_dtype=None
+        "cpu",
+        args.pretrained_model_name_or_path,
+        args.attn_mode,
+        args.split_attn,
+        "cpu",
+        dit_weight_dtype=loading_dtype,
+        fp8_scaled=args.fp8_scaled,
     )
 
     if args.gradient_checkpointing:
@@ -561,7 +571,10 @@ def train(args):
     else:
         # LLLite 自体は fp32 で学習、DiT は weight_dtype
         dit_weight_dtype = weight_dtype
-    dit.to(dit_weight_dtype)
+    if not args.fp8_scaled:
+        dit.to(dit_weight_dtype)
+    else:
+        dit_weight_dtype = torch.bfloat16
     dit.to(accelerator.device)
 
     # LLLite は fp32 (full_*16 のときは weight_dtype)
@@ -937,6 +950,7 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="(unsupported in MVP) offload activations to CPU async",
     )
+    parser.add_argument("--fp8_scaled", action="store_true", help="Use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument(
         "--skip_latents_validity_check",
         action="store_true",
