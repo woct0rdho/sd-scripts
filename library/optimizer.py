@@ -623,15 +623,11 @@ def append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names):
     lrs = lr_scheduler.get_last_lr()
 
     for lr_index in range(len(lrs)):
-        name = names[lr_index]
-        logs["lr/" + name] = float(lrs[lr_index])
+        name = "/" + names[lr_index] if names else ""
+        logs["lr" + name] = float(lrs[lr_index])
 
         if optimizer_type.lower().startswith("DAdapt".lower()) or optimizer_type.lower().startswith("Prodigy".lower()):
-            logs["lr/d*lr/" + name] = (
-                lr_scheduler.optimizers[-1].param_groups[lr_index]["d"] * lr_scheduler.optimizers[-1].param_groups[lr_index]["lr"]
-            )
-            if "effective_lr" in lr_scheduler.optimizers[-1].param_groups[lr_index]:
-                logs["lr/d*eff_lr/" + name] = (
-                    lr_scheduler.optimizers[-1].param_groups[lr_index]["d"]
-                    * lr_scheduler.optimizers[-1].param_groups[lr_index]["effective_lr"]
-                )
+            opt = lr_scheduler.optimizers[-1] if hasattr(lr_scheduler, "optimizers") else lr_scheduler.optimizer
+            logs["lr/d*lr" + name] = opt.param_groups[lr_index]["d"] * opt.param_groups[lr_index]["lr"]
+            if "effective_lr" in opt.param_groups[lr_index]:
+                logs["lr/d*eff_lr" + name] = opt.param_groups[lr_index]["d"] * opt.param_groups[lr_index]["effective_lr"]
