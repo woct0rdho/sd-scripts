@@ -100,6 +100,11 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Timestep distribution shift for rectified flow training (default: 1.0)",
     )
     parser.add_argument(
+        "--conditioning",
+        action="store_true",
+        help="Enable conditioning training with reference images / 参照画像による条件付き学習を有効にする",
+    )
+    parser.add_argument(
         "--timestep_sampling",
         type=str,
         default="sigmoid",
@@ -432,6 +437,7 @@ def do_sample(
     guidance_scale: float = 1.0,
     flow_shift: float = 3.0,
     neg_crossattn_emb: Optional[torch.Tensor] = None,
+    control_latents: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Generate a sample using Euler discrete sampling for rectified flow.
 
@@ -446,6 +452,7 @@ def do_sample(
         guidance_scale: CFG scale (1.0 = no guidance)
         flow_shift: Flow shift parameter for rectified flow
         neg_crossattn_emb: Negative cross-attention embeddings for CFG
+        control_latents: Optional conditioning latents (B, C, T, H, W)
 
     Returns:
         Denoised latents
@@ -476,21 +483,26 @@ def do_sample(
 
     use_cfg = guidance_scale > 1.0 and neg_crossattn_emb is not None
 
+    def call_dit(model_input: torch.Tensor, embeddings: torch.Tensor) -> torch.Tensor:
+        if control_latents is not None:
+            model_input = torch.cat([model_input, control_latents], dim=2)
+        model_output = dit(model_input, t, embeddings, padding_mask=padding_mask)
+        if control_latents is not None:
+            model_output = model_output[:, :, : x.shape[2], :, :]
+        return model_output.float()
+
     for i in tqdm(range(steps), desc="Sampling"):
         sigma = sigmas[i]
         t = sigma.unsqueeze(0)  # (1,)
 
         if use_cfg:
             # CFG: two separate passes to reduce memory usage
-            pos_out = dit(x, t, crossattn_emb, padding_mask=padding_mask)
-            pos_out = pos_out.float()
-            neg_out = dit(x, t, neg_crossattn_emb, padding_mask=padding_mask)
-            neg_out = neg_out.float()
+            pos_out = call_dit(x, crossattn_emb)
+            neg_out = call_dit(x, neg_crossattn_emb)
 
             model_output = neg_out + guidance_scale * (pos_out - neg_out)
         else:
-            model_output = dit(x, t, crossattn_emb, padding_mask=padding_mask)
-            model_output = model_output.float()
+            model_output = call_dit(x, crossattn_emb)
 
         # Euler step: x_{t-1} = x_t - (sigma_t - sigma_{t-1}) * model_output
         dt = sigmas[i + 1] - sigma
@@ -723,10 +735,48 @@ def _sample_image_inference(
             else:
                 neg_crossattn_emb = neg_pe
 
+    control_latents = None
+    controlnet_image = prompt_dict.get("controlnet_image")
+    if controlnet_image is not None and os.path.isfile(controlnet_image):
+        logger.info(f"  loading controlnet image: {controlnet_image}")
+        ctrl_img = Image.open(controlnet_image).convert("RGB")
+        if ctrl_img.size != (width, height):
+            logger.info(f"    resizing controlnet image from {ctrl_img.size} to {(width, height)}")
+            ctrl_img = ctrl_img.resize((width, height), Image.Resampling.LANCZOS)
+
+        ctrl_img_np = np.array(ctrl_img)
+        ctrl_img_tensor = torch.from_numpy(ctrl_img_np).permute(2, 0, 1).float() / 255.0
+        ctrl_img_tensor = (ctrl_img_tensor * 2.0 - 1.0).clamp(-1.0, 1.0).unsqueeze(0)
+
+        org_vae_device = vae.device
+        try:
+            vae.to(accelerator.device)
+            ctrl_img_tensor = ctrl_img_tensor.to(accelerator.device, dtype=vae.dtype)
+            with torch.no_grad(), accelerator.autocast():
+                control_latents = vae.encode_pixels_to_latents(ctrl_img_tensor)
+        finally:
+            vae.to(org_vae_device)
+
+        if control_latents.ndim == 4:
+            control_latents = control_latents.unsqueeze(2)
+        control_latents = control_latents.to(accelerator.device, dtype=compute_dtype)
+        logger.info(f"    control_latents shape: {control_latents.shape}")
+
     # Generate sample
     clean_memory_on_device(accelerator.device)
     latents = do_sample(
-        height, width, seed, dit, crossattn_emb, sample_steps, compute_dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
+        height,
+        width,
+        seed,
+        dit,
+        crossattn_emb,
+        sample_steps,
+        compute_dtype,
+        accelerator.device,
+        scale,
+        flow_shift,
+        neg_crossattn_emb,
+        control_latents=control_latents,
     )
 
     # Decode latents

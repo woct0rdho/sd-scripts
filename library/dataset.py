@@ -164,6 +164,9 @@ class ImageInfo:
             None  # crop left top right bottom in original pixel size, not latents size
         )
         self.cond_img_path: Optional[str] = None
+        self.cond_latents: Optional[torch.Tensor] = None
+        self.cond_latents_flipped: Optional[torch.Tensor] = None
+        self.cond_latents_npz: Optional[str] = None
         self.image: Optional[Image.Image] = None  # optional, original PIL Image
         self.text_encoder_outputs_npz: Optional[str] = None  # filename. set in cache_text_encoder_outputs
 

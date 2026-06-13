@@ -19,6 +19,7 @@ from library.dataset import (
     load_image,
 )
 from library.dreambooth_dataset import DreamBoothDataset
+from library.strategy_base import LatentsCachingStrategy
 from library.subset import ControlNetSubset, DreamBoothSubset
 from library.utils import resize_image, setup_logging, trim_and_resize_if_required
 
@@ -108,6 +109,8 @@ class ControlNetDataset(BaseDataset):
             skip_image_resolution,
         )
 
+        self.cache_conditioning_latents = False
+
         # config_util等から参照される値をいれておく（若干微妙なのでなんとかしたい）
         self.image_data = self.dreambooth_dataset_delegate.image_data
         self.batch_size = batch_size
@@ -163,7 +166,11 @@ class ControlNetDataset(BaseDataset):
 
         self.conditioning_image_transforms = IMAGE_TRANSFORMS
 
+    def set_cache_conditioning_latents(self, enabled: bool):
+        self.cache_conditioning_latents = enabled
+
     def set_current_strategies(self):
+        super().set_current_strategies()
         return self.dreambooth_dataset_delegate.set_current_strategies()
 
     def make_buckets(self):
@@ -172,10 +179,94 @@ class ControlNetDataset(BaseDataset):
         self.buckets_indices = self.dreambooth_dataset_delegate.buckets_indices
 
     def new_cache_latents(self, model: Any, accelerator: Accelerator):
-        return self.dreambooth_dataset_delegate.new_cache_latents(model, accelerator)
+        self.dreambooth_dataset_delegate.new_cache_latents(model, accelerator)
+
+        if not self.cache_conditioning_latents:
+            return
+
+        caching_strategy = LatentsCachingStrategy.get_strategy()
+        if caching_strategy is None:
+            return
+
+        image_infos = [info for info in self.dreambooth_dataset_delegate.image_data.values() if info.cond_img_path is not None]
+        if len(image_infos) == 0:
+            return
+
+        logger.info("caching conditioning latents with caching strategy.")
+        original_values = []
+        try:
+            for info in image_infos:
+                original_values.append(
+                    (
+                        info,
+                        info.absolute_path,
+                        info.image,
+                        info.latents_npz,
+                        info.latents,
+                        info.latents_flipped,
+                        info.latents_original_size,
+                        info.latents_crop_ltrb,
+                        info.alpha_mask,
+                    )
+                )
+                info.absolute_path = info.cond_img_path
+                info.image = None
+                info.latents_npz = None
+                info.latents = None
+                info.latents_flipped = None
+                info.latents_original_size = None
+                info.latents_crop_ltrb = None
+                info.alpha_mask = None
+
+            self.dreambooth_dataset_delegate.new_cache_latents(model, accelerator)
+
+            for info in image_infos:
+                info.cond_latents_npz = info.latents_npz
+                if not caching_strategy.cache_to_disk:
+                    info.cond_latents = info.latents
+                    info.cond_latents_flipped = info.latents_flipped
+        finally:
+            for (
+                info,
+                absolute_path,
+                image,
+                latents_npz,
+                latents,
+                latents_flipped,
+                latents_original_size,
+                latents_crop_ltrb,
+                alpha_mask,
+            ) in original_values:
+                info.absolute_path = absolute_path
+                info.image = image
+                info.latents_npz = latents_npz
+                info.latents = latents
+                info.latents_flipped = latents_flipped
+                info.latents_original_size = latents_original_size
+                info.latents_crop_ltrb = latents_crop_ltrb
+                info.alpha_mask = alpha_mask
 
     def new_cache_text_encoder_outputs(self, models: List[Any], is_main_process: bool):
         return self.dreambooth_dataset_delegate.new_cache_text_encoder_outputs(models, is_main_process)
+
+    def _get_conditioning_latents(self, image_info, flipped: bool):
+        if image_info.cond_latents is not None:
+            cond_latents = image_info.cond_latents_flipped if flipped and image_info.cond_latents_flipped is not None else image_info.cond_latents
+            return cond_latents
+
+        if image_info.cond_latents_npz is None:
+            return None
+
+        caching_strategy = self.latents_caching_strategy or LatentsCachingStrategy.get_strategy()
+        if caching_strategy is None:
+            return None
+
+        latents, _, _, flipped_latents, _ = caching_strategy.load_latents_from_disk(
+            image_info.cond_latents_npz, image_info.bucket_reso
+        )
+        if flipped and flipped_latents is not None:
+            latents = flipped_latents
+        return torch.FloatTensor(latents)
 
     def __len__(self):
         return self.dreambooth_dataset_delegate.__len__()
@@ -190,6 +281,7 @@ class ControlNetDataset(BaseDataset):
         image_index = self.dreambooth_dataset_delegate.buckets_indices[index].batch_index * bucket_batch_size
 
         conditioning_images = []
+        conditioning_latents = []
 
         for i, image_key in enumerate(bucket[image_index : image_index + bucket_batch_size]):
             image_info = self.dreambooth_dataset_delegate.image_data[image_key]
@@ -198,6 +290,12 @@ class ControlNetDataset(BaseDataset):
             original_size_hw = example["original_sizes_hw"][i]
             crop_top_left = example["crop_top_lefts"][i]
             flipped = example["flippeds"][i]
+
+            if self.cache_conditioning_latents:
+                cond_latents = self._get_conditioning_latents(image_info, flipped)
+                if cond_latents is not None:
+                    conditioning_latents.append(cond_latents)
+
             cond_img = load_image(image_info.cond_img_path)
 
             if self.dreambooth_dataset_delegate.enable_bucket:
@@ -234,5 +332,8 @@ class ControlNetDataset(BaseDataset):
             conditioning_images.append(cond_img)
 
         example["conditioning_images"] = torch.stack(conditioning_images).to(memory_format=torch.contiguous_format).float()
+        if len(conditioning_latents) > 0:
+            assert len(conditioning_latents) == len(conditioning_images), "conditioning latents are missing for some images"
+            example["conditioning_latents"] = torch.stack(conditioning_latents).to(memory_format=torch.contiguous_format).float()
 
         return example

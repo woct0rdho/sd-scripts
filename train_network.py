@@ -906,6 +906,7 @@ class NetworkTrainer:
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
         use_user_config = args.dataset_config is not None
+        conditioning_dataset = bool(getattr(args, "conditioning", False))
 
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
@@ -921,11 +922,13 @@ class NetworkTrainer:
 
         # データセットを準備する
         if args.dataset_class is None:
-            blueprint_generator = BlueprintGenerator(ConfigSanitizer(True, True, args.masked_loss, True))
+            blueprint_generator = BlueprintGenerator(ConfigSanitizer(True, True, conditioning_dataset or args.masked_loss, True))
             if use_user_config:
                 logger.info(f"Loading dataset config from {args.dataset_config}")
                 user_config = config_util.load_user_config(args.dataset_config)
                 ignored = ["train_data_dir", "reg_data_dir", "in_json"]
+                if conditioning_dataset:
+                    ignored.append("conditioning_data_dir")
                 if any(getattr(args, attr) is not None for attr in ignored):
                     logger.warning(
                         "ignoring the following options because config file is found: {0} / 設定ファイルが利用されるため以下のオプションは無視されます: {0}".format(
@@ -933,7 +936,24 @@ class NetworkTrainer:
                         )
                     )
             else:
-                if use_dreambooth_method:
+                if conditioning_dataset:
+                    if not use_dreambooth_method:
+                        raise ValueError("ControlNet-style conditioning datasets do not support --in_json")
+                    if args.conditioning_data_dir is None:
+                        raise ValueError("--conditioning_data_dir is required for conditioning training without --dataset_config")
+                    logger.info("Training with conditioning images.")
+                    user_config = {
+                        "datasets": [
+                            {
+                                "subsets": config_util.generate_controlnet_subsets_config_by_subdirs(
+                                    args.train_data_dir,
+                                    args.conditioning_data_dir,
+                                    args.caption_extension,
+                                )
+                            }
+                        ]
+                    }
+                elif use_dreambooth_method:
                     logger.info("Using DreamBooth method.")
                     user_config = {
                         "datasets": [

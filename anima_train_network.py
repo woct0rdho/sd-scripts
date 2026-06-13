@@ -39,6 +39,18 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         super().__init__()
         self.sample_prompts_te_outputs = None
 
+    def _set_conditioning_latent_cache(self, dataset_group: Optional[DatasetGroup], enabled: bool):
+        if dataset_group is None:
+            return True
+        all_supported = True
+        for dataset in dataset_group.datasets:
+            setter = getattr(dataset, "set_cache_conditioning_latents", None)
+            if setter is not None:
+                setter(enabled)
+            else:
+                all_supported = False
+        return all_supported
+
     def assert_extra_args(
         self,
         args,
@@ -58,6 +70,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:
             logger.warning("cache_text_encoder_outputs_to_disk is enabled, so cache_text_encoder_outputs is also enabled")
             args.cache_text_encoder_outputs = True
+
+        if args.conditioning:
+            if args.masked_loss:
+                raise ValueError("--conditioning cannot be used with --masked_loss because masked loss uses conditioning_images as masks")
+            if not self._set_conditioning_latent_cache(train_dataset_group, args.cache_latents):
+                raise ValueError("--conditioning requires a ControlNet-style dataset with conditioning_data_dir")
+            if not self._set_conditioning_latent_cache(val_dataset_group, args.cache_latents):
+                raise ValueError("--conditioning requires a ControlNet-style validation dataset with conditioning_data_dir")
 
         if args.cache_text_encoder_outputs:
             assert train_dataset_group.is_text_encoder_output_cacheable(
@@ -321,8 +341,23 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         w_latent = latents.shape[-1]
         padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=compute_dtype, device=accelerator.device)
 
+        conditioning_latents = batch.get("conditioning_latents", None) if args.conditioning else None
+        if args.conditioning and conditioning_latents is None:
+            raise ValueError("--conditioning requires conditioning_latents in the batch")
+        if conditioning_latents is not None:
+            conditioning_latents = conditioning_latents.to(accelerator.device, dtype=compute_dtype)
+            if conditioning_latents.ndim == 4:
+                if conditioning_latents.shape[1] != latents.shape[1] or conditioning_latents.shape[-2:] != latents.shape[-2:]:
+                    raise ValueError("Anima conditioning_latents must match the target latent shape")
+                conditioning_latents = conditioning_latents.unsqueeze(2)
+            elif conditioning_latents.ndim != 5:
+                raise ValueError(f"unexpected conditioning latent shape: {conditioning_latents.shape}")
+
         # Call model
         noisy_model_input = noisy_model_input.unsqueeze(2)  # 4D to 5D, [B, C, H, W] -> [B, C, 1, H, W]
+        if conditioning_latents is not None:
+            noisy_model_input = torch.cat([noisy_model_input, conditioning_latents], dim=2)
+
         with torch.set_grad_enabled(is_train), accelerator.autocast():
             model_pred = anima(
                 noisy_model_input,
@@ -333,6 +368,8 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
                 target_attention_mask=t5_attn_mask,
                 source_attention_mask=attn_mask,
             )
+        if conditioning_latents is not None:
+            model_pred = model_pred[:, :, :1, :, :]
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
 
         # Rectified flow target: noise - latents
@@ -342,6 +379,40 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
 
         return model_pred, target, timesteps, weighting
+
+    def _encode_conditioning_images_if_needed(self, args, vae, batch, vae_dtype, accelerator):
+        if not args.conditioning or batch.get("conditioning_latents") is not None:
+            return
+
+        conditioning_images = batch.get("conditioning_images", None)
+        if conditioning_images is None:
+            raise ValueError("--conditioning requires conditioning_images or conditioning_latents in the batch")
+        if args.cache_latents:
+            raise ValueError("--conditioning expected cached conditioning_latents, but they were not found in the batch")
+
+        with torch.no_grad():
+            if args.vae_batch_size is None or len(conditioning_images) <= args.vae_batch_size:
+                conditioning_latents = self.encode_images_to_latents(
+                    args, vae, conditioning_images.to(accelerator.device, dtype=vae_dtype)
+                )
+            else:
+                chunks = [
+                    conditioning_images[i : i + args.vae_batch_size]
+                    for i in range(0, len(conditioning_images), args.vae_batch_size)
+                ]
+                conditioning_latents = torch.cat(
+                    [
+                        self.encode_images_to_latents(args, vae, chunk.to(accelerator.device, dtype=vae_dtype))
+                        for chunk in chunks
+                    ],
+                    dim=0,
+                )
+
+            if torch.any(torch.isnan(conditioning_latents)):
+                accelerator.print("NaN found in conditioning latents, replacing with zeros")
+                conditioning_latents = torch.nan_to_num(conditioning_latents, 0, out=conditioning_latents)
+
+            batch["conditioning_latents"] = self.shift_scale_latents(args, conditioning_latents)
 
     def process_batch(
         self,
@@ -362,6 +433,8 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         train_unet=True,
     ) -> torch.Tensor:
         """Override base process_batch for caption dropout with cached text encoder outputs."""
+
+        self._encode_conditioning_images_if_needed(args, vae, batch, vae_dtype, accelerator)
 
         # Text encoder conditions
         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
