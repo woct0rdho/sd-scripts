@@ -30,6 +30,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
+from library import attention as attention_util
 from library.utils import setup_logging
 
 setup_logging()
@@ -416,6 +417,7 @@ class CrossAttention(nn.Module):
         self.use_memory_efficient_attention_xformers = False
         self.use_memory_efficient_attention_mem_eff = False
         self.use_sdpa = False
+        self.use_flash_attn = False
 
     def set_use_memory_efficient_attention(self, xformers, mem_eff):
         self.use_memory_efficient_attention_xformers = xformers
@@ -423,6 +425,11 @@ class CrossAttention(nn.Module):
 
     def set_use_sdpa(self, sdpa):
         self.use_sdpa = sdpa
+
+    def set_use_flash_attn(self, flash_attn: bool):
+        if flash_attn and not attention_util.is_flash_attn_available():
+            raise ImportError("No usable flash-attn CUDA/ROCm extension / flash-attnの拡張が使用できないようです")
+        self.use_flash_attn = flash_attn
 
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
@@ -445,6 +452,8 @@ class CrossAttention(nn.Module):
             return self.forward_memory_efficient_mem_eff(hidden_states, context, mask)
         if self.use_sdpa:
             return self.forward_sdpa(hidden_states, context, mask)
+        if self.use_flash_attn:
+            return self.forward_flash_attn(hidden_states, context, mask)
 
         query = self.to_q(hidden_states)
         context = context if context is not None else hidden_states
@@ -552,6 +561,33 @@ class CrossAttention(nn.Module):
         out = self.to_out[0](out)
         return out
 
+    def forward_flash_attn(self, x, context=None, mask=None):
+        if mask is not None:
+            raise NotImplementedError("flash-attn does not support attention masks in SDXL CrossAttention")
+
+        h = self.heads
+        q_in = self.to_q(x)
+        context = context if context is not None else x
+        context = context.to(x.dtype)
+        k_in = self.to_k(context)
+        v_in = self.to_v(context)
+        if q_in.dtype not in (torch.float16, torch.bfloat16):
+            raise TypeError(f"flash-attn requires fp16 or bf16 q/k/v activations, got {q_in.dtype}")
+        if k_in.dtype != q_in.dtype:
+            k_in = k_in.to(q_in.dtype)
+        if v_in.dtype != q_in.dtype:
+            v_in = v_in.to(q_in.dtype)
+
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=h).contiguous(), (q_in, k_in, v_in))
+        del q_in, k_in, v_in
+
+        out = attention_util.flash_attn_func(q, k, v, 0.0)
+        del q, k, v
+
+        out = rearrange(out, "b n h d -> b n (h d)", h=h)
+        out = self.to_out[0](out)
+        return out
+
 
 # feedforward
 class GEGLU(nn.Module):
@@ -641,6 +677,10 @@ class BasicTransformerBlock(nn.Module):
         self.attn1.set_use_sdpa(sdpa)
         self.attn2.set_use_sdpa(sdpa)
 
+    def set_use_flash_attn(self, flash_attn: bool):
+        self.attn1.set_use_flash_attn(flash_attn)
+        self.attn2.set_use_flash_attn(flash_attn)
+
     def forward_body(self, hidden_states, context=None, timestep=None):
         # 1. Self-Attention
         norm_hidden_states = self.norm1(hidden_states)
@@ -729,6 +769,10 @@ class Transformer2DModel(nn.Module):
     def set_use_sdpa(self, sdpa):
         for transformer in self.transformer_blocks:
             transformer.set_use_sdpa(sdpa)
+
+    def set_use_flash_attn(self, flash_attn: bool):
+        for transformer in self.transformer_blocks:
+            transformer.set_use_flash_attn(flash_attn)
 
     def forward(self, hidden_states, encoder_hidden_states=None, timestep=None):
         # 1. Input
@@ -1061,6 +1105,13 @@ class SdxlUNet2DConditionModel(nn.Module):
             for module in block:
                 if hasattr(module, "set_use_sdpa"):
                     module.set_use_sdpa(sdpa)
+
+    def set_use_flash_attn(self, flash_attn: bool) -> None:
+        blocks = self.input_blocks + [self.middle_block] + self.output_blocks
+        for block in blocks:
+            for module in block:
+                if hasattr(module, "set_use_flash_attn"):
+                    module.set_use_flash_attn(flash_attn)
 
     def set_gradient_checkpointing(self, value=False):
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks
