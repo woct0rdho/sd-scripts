@@ -8,6 +8,7 @@ from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
 from library import sdxl_model_util, sdxl_train_util, strategy_base, strategy_sd, strategy_sdxl
+import library.accelerator_setup as accelerator_setup
 import library.args as args_util
 import library.model_io as model_io
 from library.dataset import DatasetGroup, MinimalDataset
@@ -36,6 +37,8 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 
         if args.compile and args.deepspeed:
             raise ValueError("--compile is not supported with --deepspeed in SDXL network training")
+
+        accelerator_setup.apply_cuda_performance_options(args)
 
         if args.cache_text_encoder_outputs:
             assert (

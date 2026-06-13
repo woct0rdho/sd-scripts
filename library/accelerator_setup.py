@@ -32,6 +32,37 @@ logger = logging.getLogger(__name__)
 HIGH_VRAM = False
 
 
+def add_cuda_performance_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--cuda_allow_tf32",
+        action="store_true",
+        help="Allow TF32 on Ampere or higher GPUs / Ampere以降のGPUでTF32を許可する",
+    )
+    parser.add_argument(
+        "--cuda_cudnn_benchmark",
+        action="store_true",
+        help="Enable cuDNN benchmark for possibly faster training / cuDNNのベンチマークを有効にして学習の高速化を図る",
+    )
+
+
+def apply_cuda_performance_options(args: argparse.Namespace):
+    if not torch.cuda.is_available():
+        return
+
+    if getattr(args, "cuda_allow_tf32", False):
+        # PyTorch 2.12 Inductor still calls the legacy matmul precision getter
+        # while compiling. Using the newer torch.backends.*.fp32_precision API
+        # makes that getter raise, so use one legacy API family consistently.
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+
+    if getattr(args, "cuda_cudnn_benchmark", False):
+        torch.backends.cudnn.benchmark = True
+        logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
+
+
 def enable_high_vram(args: argparse.Namespace):
     if args.highvram:
         logger.info("highvram is enabled / highvramが有効です")

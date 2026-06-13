@@ -131,6 +131,8 @@ def train(args):
     if args.compile and args.deepspeed:
         raise ValueError("--compile is not supported with --deepspeed in SDXL training")
 
+    accelerator_setup.apply_cuda_performance_options(args)
+
     if args.seed is not None:
         set_seed(args.seed)  # 乱数系列を初期化する
 
