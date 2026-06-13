@@ -116,6 +116,11 @@ class ControlNetDataset(BaseDataset):
         self.validation_split = validation_split
         self.validation_seed = validation_seed
         self.resize_interpolation = resize_interpolation
+        self.enable_bucket = self.dreambooth_dataset_delegate.enable_bucket
+        self.min_bucket_reso = self.dreambooth_dataset_delegate.min_bucket_reso
+        self.max_bucket_reso = self.dreambooth_dataset_delegate.max_bucket_reso
+        self.bucket_reso_steps = self.dreambooth_dataset_delegate.bucket_reso_steps
+        self.bucket_no_upscale = self.dreambooth_dataset_delegate.bucket_no_upscale
 
         # assert all conditioning data exists
         missing_imgs = []
