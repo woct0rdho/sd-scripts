@@ -27,6 +27,40 @@ except ImportError:
     xops = None
 
 
+def is_flash_attn_available() -> bool:
+    return (
+        flash_attn is not None
+        and flash_attn_func is not None
+        and flash_attn_varlen_func is not None
+    )
+
+
+def get_transformers_attn_implementation(model) -> Optional[str]:
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+    return getattr(config, "_attn_implementation", getattr(config, "attn_implementation", None))
+
+
+def set_transformers_attn_implementation(model, implementation: str) -> None:
+    if hasattr(model, "set_attn_implementation"):
+        model.set_attn_implementation(implementation)
+        return
+    if hasattr(model, "set_attention_implementation"):
+        model.set_attention_implementation(implementation)
+        return
+
+    config = getattr(model, "config", None)
+    if config is None:
+        raise AttributeError(f"{model.__class__.__name__} has no Transformers attention implementation API")
+    if hasattr(config, "_attn_implementation_internal"):
+        config._attn_implementation_internal = implementation
+    elif hasattr(config, "_attn_implementation"):
+        config._attn_implementation = implementation
+    else:
+        config.attn_implementation = implementation
+
+
 @dataclass
 class AttentionParams:
     attn_mode: Optional[str] = None
@@ -225,6 +259,8 @@ def attention(
             x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
 
     elif attn_params.attn_mode == "flash":
+        if not is_flash_attn_available():
+            raise ImportError("flash-attn is not available or its CUDA/ROCm extension could not be loaded")
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
