@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 from .network_base import ArchConfig, AdditionalNetwork, detect_arch_config, _parse_kv_pairs
 from library.utils import setup_logging
+from networks.lora_alpha import prepare_lokr_state_dict_for_network_alpha
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -506,6 +507,7 @@ def create_network(
     if loraplus_lr_ratio is not None or loraplus_unet_lr_ratio is not None or loraplus_text_encoder_lr_ratio is not None:
         network.set_loraplus_lr_ratio(loraplus_lr_ratio, loraplus_unet_lr_ratio, loraplus_text_encoder_lr_ratio)
 
+    network.prepare_state_dict_for_network_alpha = prepare_lokr_state_dict_for_network_alpha
     return network
 
 
@@ -519,32 +521,21 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    # detect dim/alpha from weights
-    modules_dim = {}
-    modules_alpha = {}
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
+
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lokr_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoKr modules to network_alpha: {network_alpha}")
+
     train_llm_adapter = False
     use_tucker = False
-    for key, value in weights_sd.items():
+    for key in weights_sd.keys():
         if "." not in key:
             continue
 
         lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lokr_w2_a" in key:
-            # low-rank mode: dim detection depends on Tucker vs non-Tucker
-            if "lokr_t2" in key.replace("lokr_w2_a", "lokr_t2") and lora_name + ".lokr_t2" in weights_sd:
-                # Tucker: w2_a = (rank, out_k) → dim = w2_a.shape[0]
-                dim = value.shape[0]
-            else:
-                # Non-Tucker: w2_a = (out_k, rank) → dim = w2_a.shape[1]
-                dim = value.shape[1]
-            modules_dim[lora_name] = dim
-        elif "lokr_w2" in key and "lokr_w2_a" not in key and "lokr_w2_b" not in key:
-            # full matrix mode: set dim large enough to trigger full-matrix path
-            if lora_name not in modules_dim:
-                modules_dim[lora_name] = max(value.shape[0], value.shape[1])
-
         if "lokr_t2" in key:
             use_tucker = True
 
@@ -574,6 +565,7 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
         module_kwargs=module_kwargs,
         train_llm_adapter=train_llm_adapter,
     )
+    network.prepare_state_dict_for_network_alpha = prepare_lokr_state_dict_for_network_alpha
     return network, weights_sd
 
 

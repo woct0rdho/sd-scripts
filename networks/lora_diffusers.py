@@ -15,6 +15,7 @@ from library.device_utils import init_ipex, get_preferred_device
 init_ipex()
 
 from library.utils import setup_logging
+from networks.lora_alpha import prepare_lora_state_dict_for_network_alpha
 setup_logging()
 import logging
 logger = logging.getLogger(__name__)
@@ -240,29 +241,22 @@ class LoRAModule(torch.nn.Module):
 
 # Create network from weights for inference, weights are not loaded here
 def create_network_from_weights(
-    text_encoder: Union[CLIPTextModel, List[CLIPTextModel]], unet: UNet2DConditionModel, weights_sd: Dict, multiplier: float = 1.0
+    text_encoder: Union[CLIPTextModel, List[CLIPTextModel]],
+    unet: UNet2DConditionModel,
+    weights_sd: Dict,
+    multiplier: float = 1.0,
+    network_alpha: Optional[float] = None,
 ):
-    # get dim/alpha mapping
-    modules_dim = {}
-    modules_alpha = {}
-    for key, value in weights_sd.items():
-        if "." not in key:
-            continue
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
 
-        lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lora_down" in key:
-            dim = value.size()[0]
-            modules_dim[lora_name] = dim
-            # logger.info(f"{lora_name} {value.size()} {dim}")
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
 
-    # support old LoRA without alpha
-    for key in modules_dim.keys():
-        if key not in modules_alpha:
-            modules_alpha[key] = modules_dim[key]
-
-    return LoRANetwork(text_encoder, unet, multiplier=multiplier, modules_dim=modules_dim, modules_alpha=modules_alpha)
+    network = LoRANetwork(text_encoder, unet, multiplier=multiplier, modules_dim=modules_dim, modules_alpha=modules_alpha)
+    network.prepared_weights_sd = weights_sd
+    return network
 
 
 def merge_lora_weights(pipe, weights_sd: Dict, multiplier: float = 1.0):
@@ -270,7 +264,7 @@ def merge_lora_weights(pipe, weights_sd: Dict, multiplier: float = 1.0):
     unet = pipe.unet
 
     lora_network = create_network_from_weights(text_encoders, unet, weights_sd, multiplier=multiplier)
-    lora_network.load_state_dict(weights_sd)
+    lora_network.load_state_dict(lora_network.prepared_weights_sd)
     lora_network.merge_to(multiplier=multiplier)
 
 
@@ -523,7 +517,7 @@ if __name__ == "__main__":
     lora_network: LoRANetwork = create_network_from_weights(text_encoders, pipe.unet, lora_sd, multiplier=1.0)
 
     logger.info(f"load LoRA network weights")
-    lora_network.load_state_dict(lora_sd)
+    lora_network.load_state_dict(lora_network.prepared_weights_sd)
 
     lora_network.to(device, dtype=pipe.unet.dtype)  # required to apply_to. merge_to works without this
 

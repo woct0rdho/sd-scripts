@@ -18,6 +18,7 @@ from transformers import CLIPTextModel
 import torch
 from torch import nn
 from library.utils import setup_logging
+from networks.lora_alpha import prepare_lora_state_dict_for_network_alpha, refresh_lora_module_scales
 
 setup_logging()
 import logging
@@ -237,25 +238,13 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    # get dim/alpha mapping
-    modules_dim = {}
-    modules_alpha = {}
-    for key, value in weights_sd.items():
-        if "." not in key:
-            continue
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
 
-        lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lora_down" in key:
-            dim = value.size()[0]
-            modules_dim[lora_name] = dim
-            # logger.info(f"{lora_name} {value.size()} {dim}")
-
-    # support old LoRA without alpha
-    for key in modules_dim.keys():
-        if key not in modules_alpha:
-            modules_alpha = modules_dim[key]
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} DyLoRA modules to network_alpha: {network_alpha}")
 
     module_class = DyLoRAModule
 
@@ -376,7 +365,7 @@ class DyLoRANetwork(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.multiplier = self.multiplier
 
-    def load_weights(self, file):
+    def load_weights(self, file, network_alpha: Optional[float] = None):
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
 
@@ -384,7 +373,14 @@ class DyLoRANetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
+        if network_alpha is not None:
+            network_alpha = float(network_alpha)
+        weights_sd, _, _, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+        if network_alpha is not None and rescaled_modules > 0:
+            logger.info(f"rescaled {rescaled_modules} DyLoRA modules to network_alpha: {network_alpha}")
+
         info = self.load_state_dict(weights_sd, False)
+        refresh_lora_module_scales(self.text_encoder_loras + self.unet_loras)
         return info
 
     def apply_to(self, text_encoder, unet, apply_text_encoder=True, apply_unet=True):
