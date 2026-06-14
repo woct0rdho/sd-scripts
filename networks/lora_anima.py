@@ -6,6 +6,7 @@ import re
 from typing import Dict, List, Optional, Tuple, Type, Union
 import torch
 from library.utils import setup_logging
+from networks.lora_alpha import prepare_lora_state_dict_for_network_alpha, refresh_lora_module_scales
 
 import logging
 
@@ -345,20 +346,20 @@ def create_network_from_weights(multiplier, file, ae, text_encoders, unet, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    modules_dim = {}
-    modules_alpha = {}
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
+
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
+
     train_llm_adapter = False
-    for key, value in weights_sd.items():
+    for key in weights_sd.keys():
         if "." not in key:
             continue
 
         lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lora_down" in key:
-            dim = value.size()[0]
-            modules_dim[lora_name] = dim
-
         if "llm_adapter" in lora_name:
             train_llm_adapter = True
 
@@ -570,7 +571,7 @@ class LoRANetwork(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.enabled = is_enabled
 
-    def load_weights(self, file):
+    def load_weights(self, file, network_alpha: Optional[float] = None):
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
 
@@ -578,7 +579,14 @@ class LoRANetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
+        if network_alpha is not None:
+            network_alpha = float(network_alpha)
+        weights_sd, _, _, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+        if network_alpha is not None and rescaled_modules > 0:
+            logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
+
         info = self.load_state_dict(weights_sd, False)
+        refresh_lora_module_scales(self.text_encoder_loras + self.unet_loras)
         return info
 
     def apply_to(self, text_encoders, unet, apply_text_encoder=True, apply_unet=True):
