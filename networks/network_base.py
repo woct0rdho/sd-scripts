@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 import torch
 from library.sdxl_original_unet import InferSdxlUNet2DConditionModel
 from library.utils import setup_logging
+from networks.lora_alpha import refresh_lora_module_scales
 
 setup_logging()
 import logging
@@ -295,7 +296,7 @@ class AdditionalNetwork(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.enabled = is_enabled
 
-    def load_weights(self, file):
+    def load_weights(self, file, network_alpha: Optional[float] = None):
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
 
@@ -303,7 +304,16 @@ class AdditionalNetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
+        if network_alpha is not None:
+            network_alpha = float(network_alpha)
+        prepare_state_dict = getattr(self, "prepare_state_dict_for_network_alpha", None)
+        if prepare_state_dict is not None:
+            weights_sd, _, _, rescaled_modules = prepare_state_dict(weights_sd, network_alpha)
+            if network_alpha is not None and rescaled_modules > 0:
+                logger.info(f"rescaled {rescaled_modules} modules to network_alpha: {network_alpha}")
+
         info = self.load_state_dict(weights_sd, False)
+        refresh_lora_module_scales(self.text_encoder_loras + self.unet_loras)
         return info
 
     def apply_to(self, text_encoders, unet, apply_text_encoder=True, apply_unet=True):
