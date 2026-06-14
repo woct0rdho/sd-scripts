@@ -314,7 +314,12 @@ def load_text_encoder(
             lora_weights_list.append(lora_sd)
 
     text_encoder, _ = anima_utils.load_qwen3_text_encoder(
-        args.text_encoder, dtype=dtype, device=device, lora_weights=lora_weights_list, lora_multipliers=args.lora_multiplier
+        args.text_encoder,
+        dtype=dtype,
+        device=device,
+        lora_weights=lora_weights_list,
+        lora_multipliers=args.lora_multiplier,
+        attn_mode=args.attn_mode,
     )
     text_encoder.eval()
     return text_encoder
