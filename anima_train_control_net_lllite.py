@@ -380,7 +380,9 @@ def train(args):
             )
         logger.info("Loading tokenizers...")
         weight_dtype, save_dtype = accelerator_setup.prepare_dtype(args)
-        qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
+        qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+            args.qwen3, dtype=weight_dtype, device="cpu", attn_mode=args.attn_mode
+        )
         t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
         tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
             qwen3_tokenizer=qwen3_tokenizer,
@@ -411,7 +413,9 @@ def train(args):
 
     # tokenizers and strategies
     logger.info("Loading tokenizers...")
-    qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
+    qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+        args.qwen3, dtype=weight_dtype, device="cpu", attn_mode=args.attn_mode
+    )
     t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
 
     tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(

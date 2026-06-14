@@ -174,7 +174,9 @@ def train(args):
 
     # Load tokenizers and set strategies
     logger.info("Loading tokenizers...")
-    qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
+    qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+        args.qwen3, dtype=weight_dtype, device="cpu", attn_mode=args.attn_mode
+    )
     t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
 
     # Set tokenize strategy

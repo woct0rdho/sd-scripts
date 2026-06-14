@@ -122,7 +122,9 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
 
         # Load Qwen3 text encoder (tokenizers already loaded in get_tokenize_strategy)
         logger.info("Loading Qwen3 text encoder...")
-        qwen3_text_encoder, _ = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
+        qwen3_text_encoder, _ = anima_utils.load_qwen3_text_encoder(
+            args.qwen3, dtype=weight_dtype, device="cpu", attn_mode=args.attn_mode
+        )
         qwen3_text_encoder.eval()
 
         # Load VAE
