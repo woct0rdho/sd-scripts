@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from .network_base import ArchConfig, AdditionalNetwork, detect_arch_config, _parse_kv_pairs
 from library.utils import setup_logging
+from networks.lora_alpha import prepare_loha_state_dict_for_network_alpha
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -509,6 +510,7 @@ def create_network(
     if loraplus_lr_ratio is not None or loraplus_unet_lr_ratio is not None or loraplus_text_encoder_lr_ratio is not None:
         network.set_loraplus_lr_ratio(loraplus_lr_ratio, loraplus_unet_lr_ratio, loraplus_text_encoder_lr_ratio)
 
+    network.prepare_state_dict_for_network_alpha = prepare_loha_state_dict_for_network_alpha
     return network
 
 
@@ -522,21 +524,20 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    # detect dim/alpha from weights
-    modules_dim = {}
-    modules_alpha = {}
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
+
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_loha_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoHa modules to network_alpha: {network_alpha}")
+
     train_llm_adapter = False
-    for key, value in weights_sd.items():
+    for key in weights_sd.keys():
         if "." not in key:
             continue
 
         lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "hada_w1_b" in key:
-            dim = value.shape[0]
-            modules_dim[lora_name] = dim
-
         if "llm_adapter" in lora_name:
             train_llm_adapter = True
 
@@ -563,6 +564,7 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
         module_kwargs=module_kwargs,
         train_llm_adapter=train_llm_adapter,
     )
+    network.prepare_state_dict_for_network_alpha = prepare_loha_state_dict_for_network_alpha
     return network, weights_sd
 
 
