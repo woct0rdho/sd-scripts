@@ -52,6 +52,9 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             args.fp8_base = False
             args.fp8_base_unet = False
 
+        if args.compile and args.deepspeed:
+            raise ValueError("--compile is not supported with --deepspeed in Anima network training")
+
         if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:
             logger.warning("cache_text_encoder_outputs_to_disk is enabled, so cache_text_encoder_outputs is also enabled")
             args.cache_text_encoder_outputs = True
@@ -438,8 +441,8 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         compile_utils.apply_cuda_optimizations(args)
 
         if args.compile:
-            # Apply per-block torch.compile to the DiT blocks. Reach the real Anima via
-            # unwrap_model so we mutate the underlying ModuleList regardless of any DDP wrapper.
+            # Apply per-block torch.compile to the DiT block bodies. Reach the real Anima via
+            # unwrap_model so we mutate the underlying modules regardless of any DDP wrapper.
             dit = accelerator.unwrap_model(model)
             compile_utils.compile_transformer(args, dit, [dit.blocks], disable_linear=self.is_swapping_blocks)
 

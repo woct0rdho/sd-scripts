@@ -2,11 +2,12 @@
 
 Ported / adapted from Musubi Tuner (PR kohya-ss/musubi-tuner#722).
 
-The key design choice is **per-block compilation**: instead of compiling the whole
-transformer at once, each transformer block (which all share the same structure) is
-compiled individually. This keeps the dynamo cache small (one compiled artifact reused
-across blocks), avoids recompilation blow-up, and coexists with block swapping (CPU<->GPU
-offloading) because swapped blocks can opt out of compilation per Linear layer.
+The key design choice is **per-block body compilation**: instead of compiling the whole
+transformer at once, each transformer block body (``_forward``) is compiled individually.
+This keeps the dynamo cache small (one compiled artifact reused across blocks), avoids
+recompilation blow-up, keeps gradient checkpointing outside the compiled function, and
+coexists with block swapping (CPU<->GPU offloading) because swapped blocks can opt out of
+compilation per Linear layer.
 
 Currently wired up for Anima only. The helpers are model-agnostic, so other DiT trainers
 can reuse them by passing their own list of block ModuleLists as ``target_blocks``.
@@ -57,14 +58,17 @@ def compile_transformer(
     target_blocks: list[Union[torch.nn.ModuleList, list[torch.nn.Module]]],
     disable_linear: bool,
 ) -> torch.nn.Module:
-    """Compile each block in ``target_blocks`` individually with torch.compile.
+    """Compile each block body in ``target_blocks`` individually with torch.compile.
+
+    This compiles ``block._forward`` instead of the whole ``block`` module so that
+    ``Block.forward`` can keep owning gradient checkpointing / activation offload behavior.
 
     Args:
         args: parsed arguments providing ``compile_backend`` / ``compile_mode`` /
             ``compile_dynamic`` / ``compile_fullgraph`` / ``compile_cache_size_limit``.
         transformer: the model owning the blocks (returned as-is for convenience).
-        target_blocks: list of ModuleLists (or plain lists) whose entries are compiled
-            in place; ``blocks[i]`` is replaced by its compiled version.
+        target_blocks: list of ModuleLists (or plain lists) whose block ``_forward``
+            methods are compiled in place.
         disable_linear: when True, disable compilation for Linear layers in the given
             blocks first (required for swapped blocks under block swapping).
     """
@@ -79,8 +83,8 @@ def compile_transformer(
         compile_dynamic = {"true": True, "false": False, "auto": None}[args.compile_dynamic.lower()]
 
     logger.info(
-        f"Compiling DiT blocks with torch.compile: backend={args.compile_backend}, mode={args.compile_mode}, "
-        f"dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
+        f"Compiling DiT block _forward methods with torch.compile: backend={args.compile_backend}, "
+        f"mode={args.compile_mode}, dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
     )
 
     if args.compile_cache_size_limit is not None:
@@ -95,12 +99,18 @@ def compile_transformer(
         torch._dynamo.config.force_nn_module_property_static_shapes = False
 
     for blocks in target_blocks:
-        for i, block in enumerate(blocks):
-            blocks[i] = torch.compile(
-                block,
+        for block in blocks:
+            if getattr(block, "_torch_compiled_forward", False):
+                continue
+            if not hasattr(block, "_forward"):
+                raise AttributeError(f"{block.__class__.__name__} does not have a _forward method to compile")
+
+            block._forward = torch.compile(
+                block._forward,
                 backend=args.compile_backend,
                 mode=args.compile_mode,
                 dynamic=compile_dynamic,
                 fullgraph=args.compile_fullgraph,
             )
+            block._torch_compiled_forward = True
     return transformer
