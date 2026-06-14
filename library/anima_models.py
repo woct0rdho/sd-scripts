@@ -1122,6 +1122,7 @@ class Anima(nn.Module):
                 model_dim=1024,
                 num_layers=6,
                 self_attn=True,
+                attn_mode=attn_mode,
             )
 
         self.blocks = nn.ModuleList(
@@ -1451,7 +1452,7 @@ class AdapterRotaryEmbedding(nn.Module):
 class LLMAdapterAttention(nn.Module):
     """Attention module for LLM Adapter with QK-norm and separate RoPE for query/key."""
 
-    def __init__(self, query_dim, context_dim, n_heads, head_dim):
+    def __init__(self, query_dim, context_dim, n_heads, head_dim, attn_mode="torch"):
         super().__init__()
 
         inner_dim = head_dim * n_heads
@@ -1459,6 +1460,7 @@ class LLMAdapterAttention(nn.Module):
         self.head_dim = head_dim
         self.query_dim = query_dim
         self.context_dim = context_dim
+        self.attn_mode = "torch" if attn_mode == "sdpa" else attn_mode
 
         self.q_proj = nn.Linear(query_dim, inner_dim, bias=False)
         self.q_norm = LLMAdapterRMSNorm(self.head_dim)
@@ -1488,17 +1490,61 @@ class LLMAdapterAttention(nn.Module):
             cos, sin = position_embeddings_context
             key_states = _adapter_apply_rotary_pos_emb(key_states, cos, sin)
 
-        attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
+        if self.attn_mode == "flash":
+            if query_states.dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("LLM adapter flash attention requires fp16 or bf16 tensors")
+            attn_output = self._flash_attention(query_states, key_states, value_states, mask)
+        else:
+            attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
 
         attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output
 
+    def _flash_attention(self, query_states, key_states, value_states, mask):
+        if not attention.is_flash_attn_available():
+            raise ImportError("flash-attn is not available or its CUDA/ROCm extension could not be loaded")
+
+        query_states = query_states.transpose(1, 2).contiguous()  # [B, Lq, H, D]
+        key_states = key_states.transpose(1, 2).contiguous()  # [B, Lk, H, D]
+        value_states = value_states.transpose(1, 2).contiguous()
+
+        if mask is None:
+            return attention.flash_attn_func(query_states, key_states, value_states, 0.0).transpose(1, 2)
+
+        key_mask = mask.to(torch.bool).flatten(1)
+        batch_size, query_len = query_states.shape[:2]
+        max_key_len = key_states.shape[1]
+        key_lens = key_mask.sum(dim=1).to(torch.int32)
+        query_lens = torch.full((batch_size,), query_len, dtype=torch.int32, device=query_states.device)
+        cu_seqlens_q = torch.cat(
+            [torch.zeros(1, dtype=torch.int32, device=query_states.device), torch.cumsum(query_lens, dim=0, dtype=torch.int32)]
+        )
+        cu_seqlens_k = torch.cat(
+            [torch.zeros(1, dtype=torch.int32, device=key_states.device), torch.cumsum(key_lens, dim=0, dtype=torch.int32)]
+        )
+
+        query_states = query_states.reshape(batch_size * query_len, self.n_heads, self.head_dim)
+        key_states = key_states[key_mask].contiguous()
+        value_states = value_states[key_mask].contiguous()
+
+        attn_output = attention.flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            query_len,
+            max_key_len,
+            0.0,
+        )
+        return attn_output.view(batch_size, query_len, self.n_heads, self.head_dim).transpose(1, 2)
+
 
 class LLMAdapterTransformerBlock(nn.Module):
     """Transformer block for LLM Adapter: optional self-attn + cross-attn + MLP."""
 
-    def __init__(self, source_dim, model_dim, num_heads=16, mlp_ratio=4.0, self_attn=False, layer_norm=False):
+    def __init__(self, source_dim, model_dim, num_heads=16, mlp_ratio=4.0, self_attn=False, layer_norm=False, attn_mode="torch"):
         super().__init__()
         self.has_self_attn = self_attn
 
@@ -1509,6 +1555,7 @@ class LLMAdapterTransformerBlock(nn.Module):
                 context_dim=model_dim,
                 n_heads=num_heads,
                 head_dim=model_dim // num_heads,
+                attn_mode=attn_mode,
             )
 
         self.norm_cross_attn = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
@@ -1517,6 +1564,7 @@ class LLMAdapterTransformerBlock(nn.Module):
             context_dim=source_dim,
             n_heads=num_heads,
             head_dim=model_dim // num_heads,
+            attn_mode=attn_mode,
         )
 
         self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
@@ -1568,7 +1616,16 @@ class LLMAdapter(nn.Module):
     """
 
     def __init__(
-        self, source_dim, target_dim, model_dim, num_layers=6, num_heads=16, embed=None, self_attn=False, layer_norm=False
+        self,
+        source_dim,
+        target_dim,
+        model_dim,
+        num_layers=6,
+        num_heads=16,
+        embed=None,
+        self_attn=False,
+        layer_norm=False,
+        attn_mode="torch",
     ):
         super().__init__()
         if embed is not None:
@@ -1582,7 +1639,14 @@ class LLMAdapter(nn.Module):
         self.rotary_emb = AdapterRotaryEmbedding(model_dim // num_heads)
         self.blocks = nn.ModuleList(
             [
-                LLMAdapterTransformerBlock(source_dim, model_dim, num_heads=num_heads, self_attn=self_attn, layer_norm=layer_norm)
+                LLMAdapterTransformerBlock(
+                    source_dim,
+                    model_dim,
+                    num_heads=num_heads,
+                    self_attn=self_attn,
+                    layer_norm=layer_norm,
+                    attn_mode=attn_mode,
+                )
                 for _ in range(num_layers)
             ]
         )

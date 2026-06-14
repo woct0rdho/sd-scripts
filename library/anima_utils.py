@@ -9,7 +9,7 @@ from accelerate import init_empty_weights
 
 from library.fp8_optimization_utils import apply_fp8_monkey_patch
 from library.lora_utils import load_safetensors_with_lora_and_fp8
-from library import anima_models
+from library import anima_models, attention
 from library.safetensors_utils import WeightTransformHooks
 from .utils import setup_logging
 
@@ -184,6 +184,7 @@ def load_qwen3_text_encoder(
     device: str = "cpu",
     lora_weights: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[List[float]] = None,
+    attn_mode: Optional[str] = None,
 ):
     """Load Qwen3-0.6B text encoder.
 
@@ -246,6 +247,13 @@ def load_qwen3_text_encoder(
 
         info = model.load_state_dict(new_sd, strict=False)
         logger.info(f"Loaded Qwen3 state dict: {info}")
+
+    if attn_mode == "sdpa":
+        attn_mode = "torch"
+    if attn_mode in ("flash", "torch"):
+        attn_implementation = "flash_attention_2" if attn_mode == "flash" else "eager"
+        attention.set_transformers_attn_implementation(model, attn_implementation)
+        logger.info(f"Set Qwen3 text encoder attention implementation to {attn_implementation} for attn_mode={attn_mode}")
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
