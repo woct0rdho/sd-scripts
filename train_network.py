@@ -1,4 +1,5 @@
 import gc
+import inspect
 import importlib
 import argparse
 import math
@@ -1096,6 +1097,8 @@ class NetworkTrainer:
 
         # if a new network is added in future, add if ~ then blocks for each network (;'∀')
         if args.dim_from_weights:
+            if args.network_alpha is not None:
+                net_kwargs["network_alpha"] = args.network_alpha
             network, _ = network_module.create_network_from_weights(1, args.network_weights, vae, text_encoder, unet, **net_kwargs)
         else:
             if "dropout" not in net_kwargs:
@@ -1136,8 +1139,11 @@ class NetworkTrainer:
         network.apply_to(text_encoder, unet, train_text_encoder, train_unet)
 
         if args.network_weights is not None:
-            # FIXME consider alpha of weights: this assumes that the alpha is not changed
-            info = network.load_weights(args.network_weights)
+            load_weights_params = inspect.signature(network.load_weights).parameters
+            if args.network_alpha is not None and "network_alpha" in load_weights_params:
+                info = network.load_weights(args.network_weights, network_alpha=args.network_alpha)
+            else:
+                info = network.load_weights(args.network_weights)
             accelerator.print(f"load network weights from {args.network_weights}: {info}")
 
         if args.gradient_checkpointing:
@@ -1944,8 +1950,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--network_alpha",
         type=float,
-        default=1,
-        help="alpha for LoRA weight scaling, default 1 (same as network_dim for same behavior as old version) / LoRaの重み調整のalpha値、デフォルト1（旧バージョンと同じ動作をするにはnetwork_dimと同じ値を指定）",
+        default=None,
+        help="alpha for LoRA weight scaling, default None (network module default is used; set explicitly to override loaded LoRA alpha values) / LoRaの重み調整のalpha値、デフォルトNone（ネットワークモジュールのデフォルトを使用。明示指定すると読み込んだLoRAのalpha値を上書きします）",
     )
     parser.add_argument(
         "--network_dropout",

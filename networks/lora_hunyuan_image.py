@@ -15,6 +15,7 @@ from torch import Tensor
 import re
 
 from networks import lora_flux
+from networks.lora_alpha import prepare_lora_state_dict_for_network_alpha
 from library.hunyuan_image_vae import HunyuanVAE2D
 
 from library.utils import setup_logging
@@ -159,20 +160,13 @@ def create_network_from_weights(multiplier, file, ae, text_encoders, flux, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    # get dim/alpha mapping, and train t5xxl
-    modules_dim = {}
-    modules_alpha = {}
-    for key, value in weights_sd.items():
-        if "." not in key:
-            continue
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
 
-        lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lora_down" in key:
-            dim = value.size()[0]
-            modules_dim[lora_name] = dim
-            # logger.info(lora_name, value.size(), dim)
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
 
     split_qkv = False  # split_qkv is not needed to care, because state_dict is qkv combined
 

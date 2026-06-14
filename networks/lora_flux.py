@@ -19,6 +19,7 @@ from torch import Tensor
 import re
 from library.utils import setup_logging
 from library.sdxl_original_unet import SdxlUNet2DConditionModel
+from networks.lora_alpha import prepare_lora_state_dict_for_network_alpha, refresh_lora_module_scales
 
 setup_logging()
 import logging
@@ -669,22 +670,21 @@ def create_network_from_weights(multiplier, file, ae, text_encoders, flux, weigh
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-    # get dim/alpha mapping, and train t5xxl
-    modules_dim = {}
-    modules_alpha = {}
+    network_alpha = kwargs.get("network_alpha", None)
+    if network_alpha is not None:
+        network_alpha = float(network_alpha)
+
+    weights_sd, modules_dim, modules_alpha, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+    if network_alpha is not None and rescaled_modules > 0:
+        logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
+
+    # detect whether to train t5xxl
     train_t5xxl = None
-    for key, value in weights_sd.items():
+    for key in weights_sd.keys():
         if "." not in key:
             continue
 
         lora_name = key.split(".")[0]
-        if "alpha" in key:
-            modules_alpha[lora_name] = value
-        elif "lora_down" in key:
-            dim = value.size()[0]
-            modules_dim[lora_name] = dim
-            # logger.info(lora_name, value.size(), dim)
-
         if train_t5xxl is None or train_t5xxl is False:
             train_t5xxl = "lora_te3" in lora_name
 
@@ -1025,7 +1025,7 @@ class LoRANetwork(torch.nn.Module):
                 combined_weight_norms.append(lora.combined_weight_norms.mean(dim=0))
         return torch.stack(combined_weight_norms) if len(combined_weight_norms) > 0 else None
 
-    def load_weights(self, file):
+    def load_weights(self, file, network_alpha: Optional[float] = None):
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
 
@@ -1033,7 +1033,14 @@ class LoRANetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
+        if network_alpha is not None:
+            network_alpha = float(network_alpha)
+        weights_sd, _, _, rescaled_modules = prepare_lora_state_dict_for_network_alpha(weights_sd, network_alpha)
+        if network_alpha is not None and rescaled_modules > 0:
+            logger.info(f"rescaled {rescaled_modules} LoRA modules to network_alpha: {network_alpha}")
+
         info = self.load_state_dict(weights_sd, False)
+        refresh_lora_module_scales(self.text_encoder_loras + self.unet_loras)
         return info
 
     def load_state_dict(self, state_dict, strict=True):
