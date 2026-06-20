@@ -238,19 +238,16 @@ def resize_lora_model(lora_sd, new_rank, new_conv_rank, save_dtype, device, dyna
             key_parts = key.split(".")
             block_down_name = None
             for _format in LORA_DOWN_UP_FORMATS:
-                # Currently we only match lora_down_name in the last two parts of key
+                # Currently we only match lora_down_name in the last 3 parts of key
                 # because ("down", "up") are general words and may appear in block_down_name
-                if len(key_parts) >= 2 and _format[0] == key_parts[-2]:
-                    block_down_name = ".".join(key_parts[:-2])
-                    lora_down_name = "." + _format[0]
-                    lora_up_name = "." + _format[1]
-                    weight_name = "." + key_parts[-1]
-                    break
-                if len(key_parts) >= 1 and _format[0] == key_parts[-1]:
-                    block_down_name = ".".join(key_parts[:-1])
-                    lora_down_name = "." + _format[0]
-                    lora_up_name = "." + _format[1]
-                    weight_name = ""
+                for i in range(1, 4):
+                    if len(key_parts) >= i and _format[0] == key_parts[-i]:
+                        block_down_name = ".".join(key_parts[:-i])
+                        lora_down_name = "." + _format[0]
+                        lora_up_name = "." + _format[1]
+                        weight_name = "" if i <= 1 else "." + ".".join(key_parts[-(i - 1):])
+                        break
+                if block_down_name is not None:
                     break
 
             if block_down_name is None:
