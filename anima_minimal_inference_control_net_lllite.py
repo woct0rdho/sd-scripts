@@ -139,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument(
         "--attn_mode", type=str, default="torch",
-        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],
+        choices=["flash", "feather", "torch", "sageattn", "xformers", "sdpa"],
     )
     parser.add_argument(
         "--output_type", type=str, default="images",
