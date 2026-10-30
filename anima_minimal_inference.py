@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
         "--attn_mode",
         type=str,
         default="torch",
-        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  #  "sdpa" for backward compatibility
+        choices=["flash", "feather", "torch", "sageattn", "xformers", "sdpa"],  #  "sdpa" for backward compatibility
         help="attention mode",
     )
     parser.add_argument(

@@ -1408,7 +1408,7 @@ class LLMAdapterAttention(nn.Module):
             cos, sin = position_embeddings_context
             key_states = _adapter_apply_rotary_pos_emb(key_states, cos, sin)
 
-        if self.attn_mode == "flash":
+        if self.attn_mode in ("flash", "feather"):
             if query_states.dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("LLM adapter flash attention requires fp16 or bf16 tensors")
             attn_output = self._flash_attention(query_states, key_states, value_states, mask)

@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--attn_mode",
         type=str,
         default="torch",
-        choices=["flash", "torch", "sageattn", "xformers", "sdpa"],  # "sdpa" for backward compatibility
+        choices=["flash", "feather", "torch", "sageattn", "xformers", "sdpa"],  # "sdpa" for backward compatibility
         help="attention mode",
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of DiT blocks to swap to CPU to reduce VRAM usage")

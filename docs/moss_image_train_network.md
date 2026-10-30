@@ -209,7 +209,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--timestep_cutoff=<float>` / `--timestep_uniform_ratio=<float>`
   - Parameters of `truncated_logit_normal` timestep sampling. Defaults `0.95` and `0.01`, the values of the MOSS-Image pre-training.
 * `--attn_mode=<choice>`
-  - Attention implementation to use. Choose from `torch` (default), `xformers`, `flash`, `sageattn`. `xformers` requires `--split_attn`. `sageattn` does not support training (inference only). This option overrides `--xformers`.
+  - Attention implementation to use. Choose from `torch` (default), `xformers`, `flash`, `feather`, `sageattn`. `xformers` requires `--split_attn`. `sageattn` does not support training (inference only). This option overrides `--xformers`.
 * `--split_attn`
   - Split attention computation to reduce memory usage. Required when using `--attn_mode xformers`.
 * `--sample_uncond_skip_layers=<comma separated integers>`
@@ -268,7 +268,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--discrete_flow_shift` - Rectified Flow 学習のタイムステップ分布シフト。デフォルト `1.0`（MOSS-Image の学習グリッド）。`--timestep_sampling` が `sigma`、`shift`、`truncated_logit_normal` の場合に使用されます。
 * `--sigmoid_scale` - `sigmoid`、`shift`、`flux_shift` タイムステップサンプリングのスケール係数。デフォルト `1.0`。
 * `--timestep_cutoff` / `--timestep_uniform_ratio` - `truncated_logit_normal` タイムステップサンプリングのパラメータ。デフォルトは `0.95` と `0.01`（MOSS-Image の事前学習の値）。
-* `--attn_mode` - 使用する Attention の実装。`torch`（デフォルト）、`xformers`、`flash`、`sageattn` から選択。`xformers` は `--split_attn` の指定が必要です。`sageattn` は学習をサポートしていません（推論のみ）。
+* `--attn_mode` - 使用する Attention の実装。`torch`（デフォルト）、`xformers`、`flash`、`feather`、`sageattn` から選択。`xformers` は `--split_attn` の指定が必要です。`sageattn` は学習をサポートしていません（推論のみ）。
 * `--split_attn` - メモリ使用量を減らすために attention 時にバッチを分割します。`--attn_mode xformers` 使用時に必要です。
 * `--sample_uncond_skip_layers` - サンプル画像生成で、CFG の negative（unconditional）側で飛ばす DiT ブロックのインデックス（カンマ区切り）。デフォルト `22`（公式パイプラインの設定）。空文字列で無効。[7.4 節](#74-sample-image-generation--サンプル画像生成) を参照。
 

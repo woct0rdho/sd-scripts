@@ -131,7 +131,7 @@ def load_moss_image_model(
     Args:
         device: device used for LoRA merging and quantization
         dit_path: path to the checkpoint (first shard or single file)
-        attn_mode: "torch", "flash", "sageattn" or "xformers"
+        attn_mode: "torch", "flash", "feather", "sageattn" or "xformers"
         split_attn: process each sample separately in attention (saves memory for variable length batches)
         loading_device: device to load the weights to
         dit_weight_dtype: dtype of the weights. None loads the weights as is (bf16 for the official checkpoints). With

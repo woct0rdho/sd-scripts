@@ -190,7 +190,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--t5_max_token_length=<integer>`
   - Maximum token length for the T5 tokenizer. Default `512`.
 * `--attn_mode=<choice>`
-  - Attention implementation to use. Choose from `torch` (default), `xformers`, `flash`, `sageattn`. `xformers` requires `--split_attn`. `sageattn` does not support training (inference only). This option overrides `--xformers`.
+  - Attention implementation to use. Choose from `torch` (default), `xformers`, `flash`, `feather`, `sageattn`. `xformers` requires `--split_attn`. `sageattn` does not support training (inference only). This option overrides `--xformers`.
 * `--split_attn`
   - Split attention computation to reduce memory usage. Required when using `--attn_mode xformers`.
   
@@ -260,7 +260,7 @@ For LoRA training, use `network_reg_lrs` in `--network_args` instead. See [Secti
 * `--sigmoid_scale` - `sigmoid`、`shift`、`flux_shift`タイムステップサンプリングのスケール係数。デフォルト`1.0`。
 * `--qwen3_max_token_length` - Qwen3トークナイザーの最大トークン長。デフォルト`512`。
 * `--t5_max_token_length` - T5トークナイザーの最大トークン長。デフォルト`512`。
-* `--attn_mode` - 使用するAttentionの実装。`torch`（デフォルト）、`xformers`、`flash`、`sageattn`から選択。`xformers`は`--split_attn`の指定が必要です。`sageattn`はトレーニングをサポートしていません（推論のみ）。
+* `--attn_mode` - 使用するAttentionの実装。`torch`（デフォルト）、`xformers`、`flash`、`feather`、`sageattn`から選択。`xformers`は`--split_attn`の指定が必要です。`sageattn`はトレーニングをサポートしていません（推論のみ）。
 * `--split_attn` - メモリ使用量を減らすためにattention時にバッチを分割します。`--attn_mode xformers`使用時に必要です。
 
 #### コンポーネント別学習率

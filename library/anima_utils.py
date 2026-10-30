@@ -261,7 +261,7 @@ def load_qwen3_text_encoder(
 
     if attn_mode == "sdpa":
         attn_mode = "torch"
-    if attn_mode in ("flash", "torch"):
+    if attn_mode in ("flash", "feather", "torch"):
         attn_implementation = "flash_attention_2" if attn_mode == "flash" else "eager"
         attention.set_transformers_attn_implementation(model, attn_implementation)
         logger.info(f"Set Qwen3 text encoder attention implementation to {attn_implementation} for attn_mode={attn_mode}")
