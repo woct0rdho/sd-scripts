@@ -11,7 +11,7 @@ init_ipex()
 from accelerate import init_empty_weights
 from tqdm import tqdm
 from library.clip_tokenizer import CLIPTokenizer  # transformers.CLIPTokenizer with the legacy (ftfy) text normalization
-from library import accelerator_setup, model_util, sdxl_model_util, checkpoint_io, sampling, sdxl_original_unet
+from library import accelerator_setup, compile_utils, model_util, sdxl_model_util, checkpoint_io, sampling, sdxl_original_unet
 import library.model_io as model_io
 from library.clip_text_model import wrap_clip_text_model
 from .utils import setup_logging
@@ -412,6 +412,9 @@ def compile_sdxl_unet(args: argparse.Namespace, unet: sdxl_original_unet.SdxlUNe
         f"Compiling SDXL U-Net with torch.compile: backend={args.compile_backend}, mode={args.compile_mode}, "
         f"dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
     )
+    # max-autotune presets are expanded to options with coordinate_descent_tuning disabled,
+    # see the comment in library/compile_utils.py (broken kernel timings on ROCm).
+    compile_kwargs = compile_utils.build_compile_kwargs(args.compile_mode)
 
     block_groups = list(unet.input_blocks) + [unet.middle_block] + list(unet.output_blocks) + [unet.out]
     for block in block_groups:
@@ -424,9 +427,9 @@ def compile_sdxl_unet(args: argparse.Namespace, unet: sdxl_original_unet.SdxlUNe
             layer.forward = torch.compile(
                 layer.forward,
                 backend=args.compile_backend,
-                mode=args.compile_mode,
                 dynamic=compile_dynamic,
                 fullgraph=args.compile_fullgraph,
+                **compile_kwargs,
             )
             layer._sdxl_torch_compiled_forward = True
 

@@ -110,6 +110,43 @@ def apply_cuda_optimizations(args: argparse.Namespace):
         torch.backends.cudnn.benchmark = True
 
 
+# torch.compile() accepts either `mode` or `options`, never both, so the max-autotune
+# presets are expanded here into their explicit options. The expansion also turns off
+# inductor's coordinate-descent tuner, which those presets enable.
+# The coordinate-descent tuner compares kernel timings with a multiplicative margin
+# (`test < baseline * (1 - 0.001)`), which is only meaningful for positive values.
+# On ROCm (gfx1151) HIP event timings are sometimes 0 or negative, because the HSA
+# dispatch timestamps can be reversed / epoch-shifted (ROCr clock translation issue,
+# see ROCm/rocm-systems#9018; ROCProfiler-SDK works around it by swapping the values).
+# Inductor's benchmarker takes `min()` over its event samples, so one bad interval
+# makes a whole kernel's measured time negative. With a negative baseline the margin
+# above flips sign, so the tuner "improves" in both directions and oscillates forever
+# between two cached configs, e.g. -0.011579 -> -0.011590 -> -0.011579 -> ...
+# It is also slightly slower in practice, because those bogus timings make it pick
+# worse configs.
+# Everything else that max-autotune does (inductor Triton matmul templates with fused
+# epilogues) is kept, so this costs no performance. Re-enable by setting
+# coordinate_descent_tuning below once the timings are trustworthy.
+MAX_AUTOTUNE_MODE_OPTIONS = {
+    # same as the torch.compile presets, minus coordinate_descent_tuning
+    "max-autotune": {"max_autotune": True, "triton.cudagraphs": True},
+    "max-autotune-no-cudagraphs": {"max_autotune": True, "triton.cudagraphs": False},
+}
+
+
+def build_compile_kwargs(compile_mode: str) -> dict:
+    """Map `--compile_mode` to the keyword arguments for `torch.compile`.
+
+    For the max-autotune presets this returns `options` (with the coordinate-descent tuner
+    disabled, see `MAX_AUTOTUNE_MODE_OPTIONS`), otherwise it returns `mode` unchanged.
+    """
+    if compile_mode in MAX_AUTOTUNE_MODE_OPTIONS:
+        options = dict(MAX_AUTOTUNE_MODE_OPTIONS[compile_mode])
+        options["coordinate_descent_tuning"] = False
+        return {"options": options}
+    return {"mode": compile_mode}
+
+
 def compile_transformer(
     args: argparse.Namespace,
     transformer: torch.nn.Module,
@@ -144,6 +181,7 @@ def compile_transformer(
         f"Compiling DiT block _forward methods with torch.compile: backend={args.compile_backend}, "
         f"mode={args.compile_mode}, dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
     )
+    compile_kwargs = build_compile_kwargs(args.compile_mode)
 
     if args.compile_cache_size_limit is not None:
         torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
@@ -166,9 +204,9 @@ def compile_transformer(
             block._forward = torch.compile(
                 block._forward,
                 backend=args.compile_backend,
-                mode=args.compile_mode,
                 dynamic=compile_dynamic,
                 fullgraph=args.compile_fullgraph,
+                **compile_kwargs,
             )
             block._torch_compiled_forward = True
     return transformer
