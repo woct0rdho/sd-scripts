@@ -186,6 +186,13 @@ def compile_transformer(
     if args.compile_cache_size_limit is not None:
         torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
 
+    # `automatic_dynamic_shapes` switches a frame to dynamic shapes once a second set of shapes
+    # arrives, but it keeps the first (static) graph and its guards around: a recompile for the
+    # exact shape of the static graph is still needed later. `automatic_dynamic_exclusion_guard`
+    # adds the guard that routes that exact shape back to the static graph, so bucketed training
+    # pays for one dynamic graph per distinct code path instead of one graph per bucket.
+    torch._dynamo.config.automatic_dynamic_exclusion_guard = True
+
     # nn.Module の tensor 属性 (例: ControlNet-LLLite が注入する self.cond_emb) は、
     # 既定では dynamic=True でも shape が static に specialize され、解像度バケット毎に
     # recompile を誘発する。forward 入力ではなく属性経由で渡る可変長テンソルを dynamic
