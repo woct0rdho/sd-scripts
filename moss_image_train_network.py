@@ -400,9 +400,14 @@ class MossImageNetworkTrainer(train_network.NetworkTrainer):
         prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
         attn_mask = attn_mask.to(accelerator.device)
 
+        # Requiring grad on the model input keeps the compiled graph identical whether or not
+        # gradient checkpointing is enabled: without it the first block flips requires_grad
+        # mid-step under gradient accumulation and recompiles.
+        if is_train:
+            noisy_model_input.requires_grad_(True)
+
         # Gradient checkpointing (non-reentrant) needs an input which requires grad
         if args.gradient_checkpointing:
-            noisy_model_input.requires_grad_(True)
             prompt_embeds.requires_grad_(True)
 
         with torch.set_grad_enabled(is_train), accelerator.autocast():

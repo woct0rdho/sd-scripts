@@ -335,9 +335,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         )
         timesteps = timesteps / 1000.0  # scale to [0, 1] range. timesteps is float32
 
+        # Requiring grad on the model input keeps the compiled graph identical whether or not
+        # gradient checkpointing is enabled: without it the first block flips requires_grad
+        # mid-step under gradient accumulation and recompiles.
+        if is_train:
+            noisy_model_input.requires_grad_(True)
+
         # Gradient checkpointing support
         if args.gradient_checkpointing:
-            noisy_model_input.requires_grad_(True)
             for t in text_encoder_conds:
                 if t is not None and t.dtype.is_floating_point:
                     t.requires_grad_(True)
