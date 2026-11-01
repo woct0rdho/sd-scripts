@@ -229,6 +229,8 @@ For LoRA training, use `network_reg_lrs` in `--network_args` instead. See [Secti
   - Disable internal caching in Qwen-Image VAE to reduce VRAM usage.
 * `--compile` and related options
   - Speed up training with per-block `torch.compile`. See the [torch.compile for Anima guide](anima_torch_compile.md) for details.
+* `--convrot_int8` / `--convrot_int8_bwd`
+  - Quantize the frozen DiT base weights (attention q/k/v/out projections and the MLP of every block, 280 layers) to ConvRot INT8 at load time: block-diagonal Hadamard rotation + per-channel INT8, with a fused Triton INT8 GEMM (online activation rotation + dynamic row-wise quantization + dequantization epilogue) in the forward. The base weight VRAM is halved and the forward GEMMs get faster. The ComfyUI pre-quantized checkpoints (`*_int8_convrot.safetensors`, e.g. `anima-base-v1.0-int8_convrot.safetensors`) are detected automatically and do not need the option. `--convrot_int8_bwd` selects the backward mode of those layers: `bf16` (default, transiently dequantized matmul, most accurate) or `int8` (reuses the fused INT8 GEMM for `grad_x`). Cannot be combined with `--fp8_scaled`. On gfx1151 with the current Triton kernels the INT8 forward is ~8% faster but the dequantizing backward costs more than it saves, so this is primarily a VRAM optimization for now.
 * `--qwen_image_vae_2d`
   - Use the image-only 2D Qwen-Image VAE. The official (3D causal Conv3d) VAE weights are converted to equivalent 2D convolutions on load, so no separate weight file is needed and, for single images, the latents are numerically equivalent to the default 3D VAE. This is roughly 2x faster and uses about 1/3 of the peak VRAM for encode/decode (e.g., about 4.4 GB / 7.7 s -> about 1.4 GB / 4.5 s for 10 images at 1024x1024 on an RTX 3090). Recommended for latent caching. Note: with the 2D VAE the peak memory is dominated by full-resolution activations and the mid-block attention, so `--vae_chunk_size` has little further effect on the peak, and `--vae_disable_cache` is a no-op (the 2D VAE has no temporal cache).
 
@@ -284,6 +286,7 @@ LoRA学習の場合は、`--network_args`の`network_reg_lrs`を使用してく�
 * `--cache_latents`, `--cache_latents_to_disk` - Qwen-Image VAEの出力をキャッシュ。
 * `--vae_chunk_size` - Qwen-Image VAEのチャンク処理サイズ。メモリ使用量を削減しますが速度が低下します。デフォルトはチャンク処理なし。
 * `--vae_disable_cache` - Qwen-Image VAEの内部キャッシュを無効化してメモリ使用量を削減します。
+* `--convrot_int8` / `--convrot_int8_bwd` - DiTのベース重み（各ブロックのattention q/k/v/out射影とMLP、280層）をロード時にConvRot INT8へ量子化します。ブロック対角Hadamard回転＋チャネル毎INT8で、forwardは融合Triton INT8 GEMM（活性のオンライン回転＋動的行単位量子化＋逆量子化エピローグ）を使います。ベース重みのVRAMが半減し、forwardのGEMMが高速になります。ComfyUIの事前量子化済みファイル（`*_int8_convrot.safetensors`、例: `anima-base-v1.0-int8_convrot.safetensors`）は自動判別されるためこのオプションは不要です。`--convrot_int8_bwd`はこれらの層のbackward方式で、`bf16`（デフォルト、一時的に逆量子化したmatmulで最も高精度）または`int8`（`grad_x`にも融合INT8 GEMMを使用）。`--fp8_scaled`とは併用できません。gfx1151では現在のTritonカーネルではforwardが約8%高速になる一方、逆量子化するbackwardのコストがそれを上回るため、現時点では主にVRAM削減目的です。
 * `--qwen_image_vae_2d` - 画像専用の2D Qwen-Image VAEを使用します。公式（3D causal Conv3d）のVAE重みをロード時に等価な2D畳み込みへ変換するため、専用の重みファイルは不要で、単一画像では出力（latent）がデフォルトの3D VAEと数値的に一致します。encode/decodeが約2倍高速で、ピークVRAMが約1/3になります（RTX 3090・1024x1024・10枚で約4.4GB/7.7秒→約1.4GB/4.5秒）。latentキャッシュ用途に推奨です。注意: 2D VAEではピークメモリがフル解像度のアクティベーションやmid-blockのattentionに移るため、`--vae_chunk_size`のピークへの追加効果は小さく、また`--vae_disable_cache`は無効です（2D VAEに時間方向のキャッシュは無いため）。
 
 #### 非互換・非サポートの引数
@@ -456,6 +459,8 @@ Anima models can be large, so GPUs with limited VRAM may require optimization:
 
 - **`--cache_latents`**: Caches Qwen-Image VAE outputs so the VAE can be freed from VRAM during training.
 
+- **`--convrot_int8`**: Quantizes the frozen base weights to ConvRot INT8 at load time (about 15.6 -> 14.0 GiB peak with `--compile` at 1024x1024 in our measurement). The forward gets faster, the default `bf16` backward dequantizes the weight transiently so the step is currently slower overall; the ComfyUI `*_int8_convrot` checkpoints are detected automatically.
+
 - **Using Adafactor optimizer**: Can reduce VRAM usage:
   ```
   --optimizer_type adafactor --optimizer_args "relative_step=False" "scale_parameter=False" "warmup_init=False" --lr_scheduler constant_with_warmup --max_grad_norm 0.0
@@ -472,6 +477,7 @@ Animaモデルは大きい場合があるため、VRAMが限られたGPUでは�
 - `--gradient_checkpointing`: 標準的な勾配チェックポイント
 - `--cache_text_encoder_outputs`: Qwen3の出力をキャッシュ
 - `--cache_latents`: Qwen-Image VAEの出力をキャッシュ
+- `--convrot_int8`: ベース重みをロード時にConvRot INT8へ量子化（計測では1024x1024・`--compile`でピークVRAMが約15.6→14.0GiB）。forwardは高速化しますが、デフォルトの`bf16` backwardは重みを一時的に逆量子化するため、現状はステップ全体では遅くなります。ComfyUIの`*_int8_convrot`ファイルは自動判別されます。
 - Adafactorオプティマイザの使用
 
 </details>

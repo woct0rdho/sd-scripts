@@ -1,4 +1,4 @@
-"""Tests for ConvRot INT8 (library/convrot_int8_kernels.py, library/convrot_int8_utils.py) and its MOSS-Image wiring.
+"""Tests for ConvRot INT8 (library/convrot_int8_kernels.py, library/convrot_int8_utils.py) and its MOSS-Image / Anima wiring.
 
 CPU tests exercise the eager fallback (exact math up to float rounding) and the streaming quantizer; CUDA tests exercise
 the fused Triton kernels when available.
@@ -9,10 +9,13 @@ import json
 
 import pytest
 import torch
+from accelerate import init_empty_weights
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
+from library import anima_models
+from library import anima_utils
 from library import convrot_int8_kernels as kernels
 from library import convrot_int8_utils as utils
 from library import moss_image_utils
@@ -608,6 +611,71 @@ def test_dit_target_keys_cover_the_main_block_linears_only():
         "rope.bands",
     ]:
         assert not quantizer.is_target_key(key)
+
+
+ANIMA_CONFIG = dict(
+    max_img_h=512,
+    max_img_w=512,
+    max_frames=128,
+    in_channels=16,
+    out_channels=16,
+    patch_spatial=2,
+    patch_temporal=1,
+    model_channels=2048,
+    concat_padding_mask=True,
+    crossattn_emb_channels=1024,
+    pos_emb_cls="rope3d",
+    pos_emb_learnable=True,
+    pos_emb_interpolation="crop",
+    min_fps=1,
+    max_fps=30,
+    use_adaln_lora=True,
+    adaln_lora_dim=256,
+    num_blocks=2,  # only the naming matters here
+    num_heads=16,
+    extra_per_block_abs_pos_emb=False,
+    rope_h_extrapolation_ratio=4.0,
+    rope_w_extrapolation_ratio=4.0,
+    rope_t_extrapolation_ratio=1.0,
+    extra_h_extrapolation_ratio=1.0,
+    extra_w_extrapolation_ratio=1.0,
+    extra_t_extrapolation_ratio=1.0,
+    rope_enable_fps_modulation=False,
+    use_llm_adapter=True,
+    attn_mode="torch",
+    split_attn=False,
+)
+
+
+def test_anima_target_keys_cover_attention_and_mlp_only():
+    quantizer = utils.ConvRotInt8Quantizer(
+        anima_utils.ANIMA_CONVROT_INT8_TARGET_KEYS, anima_utils.ANIMA_CONVROT_INT8_EXCLUDE_KEYS
+    )
+    with init_empty_weights():
+        model = anima_models.Anima(**ANIMA_CONFIG)
+    linears = [name for name, module in model.named_modules() if isinstance(module, nn.Linear)]
+    targeted = [name for name in linears if quantizer.is_target_key(name + ".weight")]
+    # 4 attention projections (self and cross) + the MLP of every block; nothing else in the model has these names
+    assert len(targeted) == 10 * ANIMA_CONFIG["num_blocks"]
+    assert not [name for name in targeted if "llm_adapter" in name or "adaln" in name]
+
+
+def test_anima_trainer_convrot_options_and_cast_unet():
+    import anima_train_network
+
+    parser = anima_train_network.setup_parser()
+    args = parser.parse_args(["--pretrained_model_name_or_path", "dit.safetensors", "--qwen3", "te.safetensors"])
+    assert args.convrot_int8 is False and args.convrot_int8_bwd == "bf16"
+    args = parser.parse_args(
+        ["--pretrained_model_name_or_path", "d", "--qwen3", "t", "--convrot_int8", "--convrot_int8_bwd", "int8"]
+    )
+    assert args.convrot_int8 and args.convrot_int8_bwd == "int8"
+
+    trainer = anima_train_network.AnimaNetworkTrainer()
+    # the int8 weights and the fp32 scale_weight buffers must not be cast to the weight dtype
+    assert trainer.cast_unet(args) is False
+    args.convrot_int8 = False
+    assert trainer.cast_unet(args) is True
 
 
 def test_text_encoder_target_keys_match_the_comfyui_scope():

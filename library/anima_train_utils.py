@@ -16,6 +16,7 @@ from PIL import Image
 
 from library.device_utils import init_ipex, clean_memory_on_device, synchronize_device
 from library import anima_models, anima_utils, checkpoint_io, sampling, qwen_image_autoencoder_kl
+from library.convrot_int8_utils import add_convrot_int8_arguments
 import library.compile_utils as compile_utils
 import library.model_io as model_io
 
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 def add_anima_training_arguments(parser: argparse.ArgumentParser):
     """Add Anima-specific training arguments to the parser."""
+    add_convrot_int8_arguments(parser)
     parser.add_argument(
         "--qwen3",
         type=str,

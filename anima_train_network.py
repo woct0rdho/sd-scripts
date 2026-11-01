@@ -15,6 +15,7 @@ from library import (
     anima_models,
     anima_train_utils,
     anima_utils,
+    convrot_int8_kernels,
     flux_train_utils,
     qwen_image_autoencoder_kl,
     sd3_train_utils,
@@ -65,6 +66,24 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             logger.warning("fp8_base and fp8_base_unet are not supported. / fp8_baseとfp8_base_unetはサポートされていません。")
             args.fp8_base = False
             args.fp8_base_unet = False
+
+        if args.fp8_scaled and args.convrot_int8:
+            raise ValueError(
+                "--fp8_scaled and --convrot_int8 are mutually exclusive. / --fp8_scaledと--convrot_int8は併用できません"
+            )
+        if args.convrot_int8_bwd == "int8":
+            if not convrot_int8_kernels.HAS_TRITON:
+                raise ValueError(
+                    "--convrot_int8_bwd int8 requires triton (triton-windows on Windows)"
+                    " / --convrot_int8_bwd int8 には triton（Windowsではtriton-windows）が必要です"
+                )
+            if not args.convrot_int8:
+                logger.warning(
+                    "--convrot_int8_bwd int8 only takes effect with a ConvRot INT8 base (--convrot_int8 or a pre-quantized"
+                    " *_int8_convrot checkpoint)"
+                    + " / --convrot_int8_bwd int8 は ConvRot INT8 のベース（--convrot_int8 または事前量子化済み"
+                    + " *_int8_convrot チェックポイント）でのみ有効です"
+                )
 
         if args.compile and args.deepspeed:
             raise ValueError("--compile is not supported with --deepspeed in Anima network training")
@@ -158,6 +177,8 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             loading_device,
             loading_dtype,
             args.fp8_scaled,
+            convrot_int8=args.convrot_int8,
+            convrot_int8_bwd=args.convrot_int8_bwd,
         )
 
         # Store unsloth preference so that when the base NetworkTrainer calls
@@ -515,7 +536,7 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         first_param.requires_grad_(True)
 
     def cast_unet(self, args):
-        return not args.fp8_scaled
+        return not (args.fp8_scaled or args.convrot_int8)
 
     def prepare_unet_with_accelerator(
         self, args: argparse.Namespace, accelerator: Accelerator, unet: torch.nn.Module
