@@ -9,8 +9,8 @@ from accelerate import init_empty_weights
 
 from library.fp8_optimization_utils import apply_fp8_monkey_patch
 from library.lora_utils import load_safetensors_with_lora_and_fp8
-from library import anima_models, attention
-from library.safetensors_utils import WeightTransformHooks
+from library import anima_models, attention, convrot_int8_utils
+from library.safetensors_utils import WeightTransformHooks, get_split_weight_filenames
 from .utils import setup_logging
 
 setup_logging()
@@ -28,6 +28,12 @@ FP8_OPTIMIZATION_TARGET_KEYS = ["blocks", ""]
 # ".embed." excludes Embedding in LLMAdapter
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["_embedder", "norm", "adaln", "final_layer", ".embed."]
 
+# ConvRot INT8 targets: the attention projections (self and cross) and the MLP of the main blocks, i.e. the same layers
+# as the ComfyUI `anima-base-v1.0-int8_convrot.safetensors` (254 layers). The LLM adapter, the embedders, the modulation
+# and the final layer stay in the weight dtype. A pre-quantized checkpoint dictates its own layers.
+ANIMA_CONVROT_INT8_TARGET_KEYS = ["self_attn", "cross_attn", "mlp.layer1", "mlp.layer2"]
+ANIMA_CONVROT_INT8_EXCLUDE_KEYS = ["llm_adapter", "adaln", "norm", "x_embedder", "t_embedder", "final_layer"]
+
 
 def load_anima_model(
     device: Union[str, torch.device],
@@ -39,6 +45,8 @@ def load_anima_model(
     fp8_scaled: bool = False,
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[list[float]] = None,
+    convrot_int8: bool = False,
+    convrot_int8_bwd: str = "bf16",
 ) -> anima_models.Anima:
     """
     Load Anima model from the specified checkpoint.
@@ -54,11 +62,14 @@ def load_anima_model(
         fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
         lora_weights_list (Optional[List[Dict[str, torch.Tensor]]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+        convrot_int8 (bool): Whether to quantize the base weights to ConvRot INT8 (an alternative to fp8).
+        convrot_int8_bwd (str): Backward mode of the ConvRot INT8 layers, "bf16" (transient dequantization) or "int8".
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (
         not fp8_scaled and dit_weight_dtype is not None
     ) or dit_weight_dtype is None, "dit_weight_dtype should be None when fp8_scaled is True"
+    assert not (fp8_scaled and convrot_int8), "fp8_scaled and convrot_int8 are mutually exclusive"
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
@@ -115,6 +126,19 @@ def load_anima_model(
 
     rename_hooks = WeightTransformHooks(rename_hook=rename_hook)
 
+    files = get_split_weight_filenames(dit_path) or [dit_path]
+    prequantized = convrot_int8_utils.has_comfy_quant_tensors(files)
+    if prequantized and not convrot_int8:
+        logger.info("Pre-quantized ConvRot INT8 checkpoint detected: the quantized layers are used as they are")
+    use_convrot_int8 = convrot_int8 or prequantized
+
+    quantizer = None
+    if use_convrot_int8:
+        # an empty target list only converts the pre-quantized layers of the file
+        quantizer = convrot_int8_utils.ConvRotInt8Quantizer(
+            ANIMA_CONVROT_INT8_TARGET_KEYS if convrot_int8 else [], ANIMA_CONVROT_INT8_EXCLUDE_KEYS
+        )
+
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -122,20 +146,30 @@ def load_anima_model(
         fp8_optimization=fp8_scaled,
         calc_device=device,
         move_to_device=(loading_device == device),
-        dit_weight_dtype=dit_weight_dtype,
+        dit_weight_dtype=None if use_convrot_int8 else dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
         weight_transform_hooks=rename_hooks,
+        quantizer=quantizer,
     )
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
-        if loading_device.type != "cpu":
-            # make sure all the model weights are on the loading_device
-            logger.info(f"Moving weights to {loading_device}")
-            for key in sd.keys():
-                sd[key] = sd[key].to(loading_device)
+    if use_convrot_int8:
+        convrot_int8_utils.cast_floating_tensors(sd, dit_weight_dtype)
+        convrot_int8_utils.apply_convrot_int8_monkey_patch(
+            model, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes
+        )
+        # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps the incoming tensors with the meta
+        # parameters' requires_grad (default True). The base weights are frozen for LoRA training anyway.
+        model.requires_grad_(False)
+
+    if (fp8_scaled or use_convrot_int8) and loading_device.type != "cpu":
+        # make sure all the model weights are on the loading_device
+        logger.info(f"Moving weights to {loading_device}")
+        for key in sd.keys():
+            sd[key] = sd[key].to(loading_device)
 
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     if missing:

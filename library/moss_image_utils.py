@@ -96,15 +96,6 @@ def split_fused_qkv(key: str, tensor: Optional[torch.Tensor], dim: int = moss_im
     return new_keys, [q.contiguous(), k.contiguous(), v.contiguous()]
 
 
-def _cast_floating_tensors(sd: Dict[str, torch.Tensor], dtype: Optional[torch.dtype]) -> None:
-    """Cast the floating point tensors of a (partially) quantized state dict in place, keeping the fp32 `.scale_weight`."""
-    if dtype is None:
-        return
-    for key, value in sd.items():
-        if value.is_floating_point() and not key.endswith(".scale_weight"):
-            sd[key] = value.to(dtype)
-
-
 def load_moss_image_model(
     device: Union[str, torch.device],
     dit_path: str,
@@ -189,7 +180,7 @@ def load_moss_image_model(
     sd.pop("rope.bands", None)
 
     if use_convrot_int8:
-        _cast_floating_tensors(sd, dit_weight_dtype)
+        convrot_int8_utils.cast_floating_tensors(sd, dit_weight_dtype)
         convrot_int8_utils.apply_convrot_int8_monkey_patch(
             model, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes
         )
@@ -314,7 +305,7 @@ def load_text_encoder(
             weight_transform_hooks=hooks,
             key_filter=lambda key: _strip_text_encoder_key(key) is not None,
         )
-        _cast_floating_tensors(sd, dtype)
+        convrot_int8_utils.cast_floating_tensors(sd, dtype)
         convrot_int8_utils.apply_convrot_int8_monkey_patch(
             model, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes, embedding_dtype=dtype
         )

@@ -24,6 +24,7 @@ basis).
 import json
 import math
 import os
+from argparse import ArgumentParser
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Union
@@ -610,6 +611,41 @@ def apply_convrot_int8_monkey_patch(
 
 def is_convrot_int8_model(model: nn.Module) -> bool:
     return bool(getattr(model, "is_convrot_int8", False))
+
+
+def cast_floating_tensors(sd: Dict[str, torch.Tensor], dtype: Optional[torch.dtype]) -> None:
+    """Cast the floating point tensors of a (partially) quantized state dict in place, keeping the fp32 `.scale_weight`."""
+    if dtype is None:
+        return
+    for key, value in sd.items():
+        if value.is_floating_point() and not key.endswith(".scale_weight"):
+            sd[key] = value.to(dtype)
+
+
+def add_convrot_int8_arguments(parser: ArgumentParser):
+    """ConvRot INT8 options for the DiT base weights (shared by the trainers; the inference scripts define their own)."""
+    parser.add_argument(
+        "--convrot_int8",
+        action="store_true",
+        help="quantize the DiT base weights (Linear layers of the main blocks) to ConvRot INT8 at load time: Hadamard rotation"
+        " + per-channel int8, fused Triton int8 GEMM in forward (requires triton / triton-windows, otherwise a slower"
+        " dequantizing fallback with the same memory saving). An alternative to fp8. The ComfyUI pre-quantized files"
+        " (*_int8_convrot.safetensors) are detected automatically and do not need this option"
+        + " / DiT のベース重み（メインブロックの Linear 層）をロード時に ConvRot INT8 に量子化する。Hadamard 回転＋チャネル毎 int8、forward は"
+        + " Triton の融合 int8 GEMM（triton / triton-windows が必要。ない場合はメモリ削減のみで遅い逆量子化フォールバック）。fp8 の代替。"
+        + "ComfyUI の事前量子化済みファイル（*_int8_convrot.safetensors）は自動判別されるのでこのオプションは不要",
+    )
+    parser.add_argument(
+        "--convrot_int8_bwd",
+        type=str,
+        default="bf16",
+        choices=["bf16", "int8"],
+        help="backward mode of the ConvRot INT8 layers (DiT and text encoder). bf16 (default): transient dequantized matmul,"
+        " most accurate. int8: reuse the fused int8 GEMM for grad_x (faster, quantizes the gradients slightly, requires triton"
+        " and CUDA)"
+        + " / ConvRot INT8 層（DiT と Text Encoder）の backward の方式。bf16（デフォルト）: 一時的に逆量子化した matmul で最も高精度。"
+        + "int8: grad_x にも融合 int8 GEMM を使う（高速だが勾配がわずかに量子化される。triton と CUDA が必要）",
+    )
 
 
 # endregion
