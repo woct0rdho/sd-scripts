@@ -40,6 +40,8 @@ quantization error.
 """
 
 import math
+import os
+from typing import Optional
 
 import torch
 
@@ -613,3 +615,200 @@ else:
     triton_quantize_rowwise = None
     int8_linear = None
     triton_dequantize_rotate_weight = None
+
+triton_int8_linear = int8_linear  # the vendored NVIDIA-oriented kernels, kept as the non-ROCm fallback
+
+
+# =============================================================================
+# feather-ops backend (ROCm): prepacked int8 WMMA GEMM for both directions
+# =============================================================================
+
+# The vendored Triton GEMM above is tuned for NVIDIA parts and needs the weight in the released `[N, K]` layout,
+# so its backward has to materialise `weight.T` (a 1 byte/param copy) on every step. feather_ops ships a gfx1151
+# HIP kernel pair that reads a single copy of the weight in a 4x4 byte micro-tile layout, which serves the forward
+# (`x @ W^T`) and the input gradient (`g @ W`, which contracts the weight's output axis) without a transposed copy.
+# The layout is a pure permutation of the released int8 bytes, so packing is lossless and the released form can be
+# recovered for the dequantizing fallback.
+FEATHER_OPS_BACKEND_ENV = "SD_SCRIPTS_CONVROT_INT8_BACKEND"
+
+
+def _import_feather_ops():
+    """The feather_ops extension, or None when it is not installed / not built / not a ROCm build."""
+    if not getattr(torch.version, "hip", None):
+        return None
+    try:
+        import feather_ops
+    except Exception:  # not installed, or the HIP extension failed to load
+        return None
+    return feather_ops
+
+
+_feather_ops = _import_feather_ops()
+
+
+def feather_ops_int8_available() -> bool:
+    """True when the prepacked int8 GEMM can be used (it also needs the Triton quantizer).
+
+    `SD_SCRIPTS_CONVROT_INT8_BACKEND=triton` forces the vendored kernels, `=feather-ops` requires this one.
+    """
+    requested = os.environ.get(FEATHER_OPS_BACKEND_ENV, "auto").lower()
+    if requested not in ("auto", "feather-ops", "triton"):
+        raise ValueError(f"{FEATHER_OPS_BACKEND_ENV} must be auto, feather-ops or triton, got {requested!r}")
+    if requested == "feather-ops" and (_feather_ops is None or not HAS_TRITON):
+        raise RuntimeError("feather-ops' prepacked int8 GEMM is not available (it needs the feather_ops extension and triton)")
+    if requested == "triton":
+        return False
+    return _feather_ops is not None and HAS_TRITON
+
+
+def int8_linear_backend() -> Optional[str]:
+    """Name of the backend used for the ConvRot INT8 GEMMs."""
+    if feather_ops_int8_available():
+        return "feather-ops"
+    return "triton" if triton_int8_linear is not None else None
+
+
+def prepare_int8_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Reorder an `[N, K]` int8 ConvRot weight into the prepacked layout, keeping the `[N, K]` shape.
+
+    The shape is preserved so that everything that only looks at `module.weight.shape` (LoRA creation, state dict
+    matching) is unaffected; the bytes are the 4x4 micro-tile order the kernel reads.
+    """
+    if not feather_ops_int8_available():
+        return weight
+    n, k = weight.shape
+    # both axes must be a multiple of the micro-tile (4) and of the MMA reduction step (16): the forward
+    # contracts k and the backward contracts n, so either one can be the reduction axis
+    if n % 16 != 0 or k % 16 != 0:
+        return weight  # not representable, the Triton path handles this weight
+    return _feather_ops.prepack_int8_convrot_weight(weight.contiguous()).reshape(n, k)
+
+
+def released_int8_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Inverse of `prepare_int8_weight`: back to the `[N, K]` layout of the released checkpoints."""
+    if not feather_ops_int8_available():
+        return weight
+    n, k = weight.shape
+    if n % 16 != 0 or k % 16 != 0:
+        return weight
+    return _feather_ops.unpack_int8_convrot_weight(weight.reshape(k // 4, n // 4, 4, 4))
+
+
+def quantize_convrot_activation(
+    x: torch.Tensor,
+    convrot: bool,
+    convrot_groupsize: int,
+    col_scale: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate (optional) and quantize an activation row-wise, as the INT8 GEMM's producer.
+
+    feather-ops does it in one pass (radix-4 Hadamard, row absmax, int8 codes) when the group size is 256;
+    otherwise this falls back to the rotation matmul plus the row-wise quantizer, and for a 64-group model the
+    Triton kernels are still used.
+
+    Args:
+        x: [M, K] activations in the model dtype.
+        convrot: apply the block-diagonal Hadamard before quantizing (the forward). The input gradient
+            quantizes as-is and rotates the GEMM output instead.
+        col_scale: optional [K] per-column multiplier applied before quantizing, i.e. the weight's
+            per-output-channel scale folded into the gradient quantizer.
+
+    Returns:
+        (int8 [M, K], fp32 [M]) quantized values and their per-row scale.
+    """
+    if _feather_ops is not None and x.is_cuda and convrot_groupsize == 256 and x.shape[-1] % 256 == 0:
+        return _feather_ops.convrot_quantize_activation(x, rotate=convrot, col_scale=col_scale)
+    if col_scale is not None:
+        x = (x * col_scale.reshape(1, -1).to(x.dtype)).to(x.dtype)
+    if convrot:
+        h = _build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
+        x = _rotate_activation(x, h, convrot_groupsize)
+    return triton_quantize_rowwise(x)
+
+
+def _feather_ops_int8_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: torch.dtype,
+    convrot: bool,
+    convrot_groupsize: int,
+) -> torch.Tensor:
+    """Forward: rotate, quantize per row, int8 GEMM with the dequantization epilogue."""
+    x_2d = x.reshape(-1, x.shape[-1])
+    x_int8, x_scale = quantize_convrot_activation(x_2d, convrot, convrot_groupsize)
+    out = _feather_ops.int8_scaled_mm(x_int8, weight, x_scale, weight_scale.reshape(-1), bias, out_dtype, False)
+    return out.reshape(*x.shape[:-1], weight.shape[0])
+
+
+def _feather_ops_int8_dgrad(
+    grad_out: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    convrot: bool,
+    convrot_groupsize: int,
+) -> torch.Tensor:
+    """Input gradient: the weight scale is folded into the gradient quantizer, then `g @ W` and the rotation back.
+
+    The GEMM contracts the weight's *output* axis, so the per-output-channel scale cannot be applied after the sum;
+    folding it into the row-wise quantization is the same identity torchao uses for `B.T` scaling.
+    """
+    grad_2d = grad_out.reshape(-1, grad_out.shape[-1])
+    # the weight's per-output-channel scale is folded into the quantizer; it cannot be applied after the sum
+    grad_int8, grad_scale = quantize_convrot_activation(grad_2d, False, convrot_groupsize, col_scale=weight_scale)
+    out = _feather_ops.int8_scaled_mm(grad_int8, weight, grad_scale, None, None, out_dtype, True)
+    if convrot:
+        h = _build_hadamard(convrot_groupsize, device=out.device, dtype=out.dtype)
+        out = _rotate_activation(out, h, convrot_groupsize)
+    return out.reshape(*grad_out.shape[:-1], weight.shape[1])
+
+
+def int8_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+    convrot: bool = False,
+    convrot_groupsize: int = 256,
+    weight_packed: bool = False,
+) -> torch.Tensor:
+    """ConvRot INT8 linear on the best available backend.
+
+    Args:
+        weight: `[N, K]` int8, in the prepacked layout when `weight_packed` (see `prepare_int8_weight`).
+        weight_packed: the weight bytes are in the feather-ops micro-tile order.
+    """
+    if weight_packed and feather_ops_int8_available() and x.is_cuda:
+        return _feather_ops_int8_linear(x, weight, weight_scale, bias, out_dtype, convrot, convrot_groupsize)
+    if triton_int8_linear is not None and x.is_cuda:
+        weight_2d = released_int8_weight(weight) if weight_packed else weight
+        return triton_int8_linear(x, weight_2d, weight_scale, bias, out_dtype, convrot, convrot_groupsize)
+    raise RuntimeError("ConvRot INT8 requires triton (triton-windows on Windows)")
+
+
+def int8_dgrad(
+    grad_out: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+    convrot: bool = False,
+    convrot_groupsize: int = 256,
+    weight_packed: bool = False,
+) -> torch.Tensor:
+    """ConvRot INT8 input gradient `grad_x = (grad_out @ W) @ H`, on the best available backend."""
+    if weight_packed and feather_ops_int8_available() and grad_out.is_cuda:
+        return _feather_ops_int8_dgrad(grad_out, weight, weight_scale, out_dtype, convrot, convrot_groupsize)
+    if triton_int8_linear is not None and grad_out.is_cuda:
+        weight_2d = released_int8_weight(weight) if weight_packed else weight
+        grad_2d = grad_out.reshape(-1, grad_out.shape[-1])
+        grad_scaled = grad_2d * weight_scale.reshape(1, -1).to(grad_2d.dtype)
+        one = torch.ones(1, device=grad_2d.device, dtype=torch.float32)
+        grad_x = triton_int8_linear(grad_scaled, weight_2d.t().contiguous(), one, None, out_dtype, False, convrot_groupsize)
+        if convrot:
+            h = _build_hadamard(convrot_groupsize, device=grad_x.device, dtype=grad_x.dtype)
+            grad_x = _rotate_activation(grad_x, h, convrot_groupsize)
+        return grad_x.reshape(*grad_out.shape[:-1], weight_2d.shape[1])
+    raise RuntimeError("ConvRot INT8 requires triton (triton-windows on Windows)")

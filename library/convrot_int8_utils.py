@@ -39,12 +39,16 @@ from library.convrot_int8_kernels import (
     _build_hadamard,
     _rotate_activation,
     _rotate_weight,
+    int8_dgrad,
     int8_linear,
+    int8_linear_backend,
+    prepare_int8_weight,
     quantize_int8_convrot_weight,
+    released_int8_weight,
     triton_dequantize_rotate_weight,
 )
 from library.device_utils import clean_memory_on_device
-from library.safetensors_utils import MemoryEfficientSafeOpen, TensorWeightAdapter, WeightTransformHooks
+from library.safetensors_utils import MemoryEfficientSafeOpen, TensorWeightAdapter, WeightTransformHooks, get_split_weight_filenames
 from library.utils import setup_logging
 
 setup_logging()
@@ -105,6 +109,20 @@ def parse_comfy_quant_spec(key: str, tensor: torch.Tensor) -> dict:
     if not isinstance(groupsize, int) or not _is_power_of_4(groupsize):
         raise ValueError(f"Invalid convrot_groupsize for {key}: {groupsize!r} (must be a power of 4, e.g. 64 or 256)")
     return spec
+
+
+def is_convrot_int8_checkpoint(model_path: str) -> bool:
+    """True when `model_path` (or its shards) carries ComfyUI ConvRot INT8 quantized layers.
+
+    Used by the trainers to know whether `--convrot_int8_bwd int8` has an INT8 base to act on even when the
+    checkpoint is pre-quantized and `--convrot_int8` was not passed. A missing or unreadable file returns False
+    so the caller only logs its hint instead of failing here.
+    """
+    try:
+        files = get_split_weight_filenames(model_path) or [model_path]
+        return has_comfy_quant_tensors(files)
+    except Exception:
+        return False
 
 
 def has_comfy_quant_tensors(files: Iterable[Union[str, Path]], *, disable_numpy_memmap: bool = False) -> bool:
@@ -381,6 +399,7 @@ def convrot_int8_linear(
     groupsize: int,
     convrot: bool,
     bwd_mode: str,
+    weight_packed: bool,
 ) -> torch.Tensor:
     """INT8 GEMM ``x @ W_rot^T * scale + bias`` with an optional online ConvRot rotation of ``x``, as a custom op.
 
@@ -390,19 +409,21 @@ def convrot_int8_linear(
 
     Args:
         x: [..., K] bf16/fp16/fp32 activations (already cast to the autocast dtype by the caller).
-        wq: [N, K] int8 weight in the rotated basis.
+        wq: [N, K] int8 weight in the rotated basis (prepacked when ``weight_packed``).
         w_scale: fp32 weight scale, [N, 1] / [N] per-channel or a single element (tensorwise).
         bias: optional [N] bias in the dtype of ``x``.
         groupsize: ConvRot group size (power of 4).
         convrot: apply the online Hadamard rotation to ``x`` before quantization (False for the int8 backward GEMM).
         bwd_mode: "bf16" or "int8"; only read by the registered backward.
+        weight_packed: ``wq`` is in feather-ops' prepacked int8 layout (a permutation of the released bytes).
 
     Returns:
         [..., N] in the dtype of ``x``.
     """
     if HAS_TRITON and x.is_cuda:
-        return int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, convrot, groupsize)
+        return int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, convrot, groupsize, weight_packed)
     # eager fallback: rotation + transient dequantized matmul, no activation quantization
+    wq = released_int8_weight(wq) if weight_packed else wq
     if convrot:
         h = _build_hadamard(groupsize, device=x.device, dtype=x.dtype)
         x = _rotate_activation(x, h, groupsize)
@@ -411,18 +432,19 @@ def convrot_int8_linear(
 
 
 @convrot_int8_linear.register_fake
-def _convrot_int8_linear_fake(x, wq, w_scale, bias, groupsize, convrot, bwd_mode):
+def _convrot_int8_linear_fake(x, wq, w_scale, bias, groupsize, convrot, bwd_mode, weight_packed):
     return x.new_empty(*x.shape[:-1], wq.shape[0])
 
 
 def _convrot_int8_linear_setup_context(ctx, inputs, output):
-    _x, wq, w_scale, _bias, groupsize, convrot, bwd_mode = inputs
+    _x, wq, w_scale, _bias, groupsize, convrot, bwd_mode, weight_packed = inputs
     # wq/w_scale are live buffers, so saving them adds no activation memory; x is not saved (base is frozen, no
     # grad_weight needed)
     ctx.save_for_backward(wq, w_scale)
     ctx.groupsize = groupsize
     ctx.convrot = convrot
     ctx.bwd_mode = bwd_mode
+    ctx.weight_packed = weight_packed
 
 
 @torch.library.custom_op("sd_scripts::convrot_int8_linear_backward", mutates_args=())
@@ -433,6 +455,7 @@ def convrot_int8_linear_backward(
     groupsize: int,
     convrot: bool,
     bwd_mode: str,
+    weight_packed: bool,
 ) -> torch.Tensor:
     """grad_x of ``convrot_int8_linear``: ``g @ W`` with ``W = W_rot R`` (R = block-diagonal Hadamard).
 
@@ -445,23 +468,17 @@ def convrot_int8_linear_backward(
     slower than this on RTX PRO 6000 (the in-loop int8 -> bf16 conversion of the weight tile is repeated M / block_m times).
 
     ``bwd_mode="int8"``: g (with the weight scale folded in) is quantized row-wise and multiplied with the INT8 weight by
-    the fused Triton GEMM in the rotated basis, then the output is rotated.
+    the fused INT8 GEMM in the rotated basis, then the output is rotated. With feather-ops the GEMM reads the same
+    prepacked weight copy as the forward (no transposed copy); the spec above describes the Triton path.
     """
     gs = groupsize
     g2d = grad_out.reshape(-1, grad_out.shape[-1])  # [M, N]
     if bwd_mode == "int8":
         if not g2d.is_cuda:
             raise RuntimeError("ConvRot INT8 backward mode 'int8' requires CUDA tensors")
-        # fold per-channel weight scale into g, then reuse the fused Triton GEMM (row-wise quant of g + int8 GEMM + dequant
-        # epilogue in one pipeline). transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
-        g_scaled = g2d * w_scale.reshape(1, -1).to(g2d.dtype)
-        one = torch.ones(1, device=g2d.device, dtype=torch.float32)
-        gx = int8_linear(g_scaled, wq.t().contiguous(), one, None, grad_out.dtype, False, gs)
-        if convrot:
-            h = _build_hadamard(gs, device=gx.device, dtype=gx.dtype)
-            gx = _rotate_activation(gx, h, gs)
+        gx = int8_dgrad(grad_out, wq, w_scale, grad_out.dtype, convrot, gs, weight_packed)
     else:
-        w = _dequantize_weight(wq, w_scale, gs, grad_out.dtype, rotate_back=convrot)  # transient [N, K]
+        w = _dequantize_weight(released_int8_weight(wq) if weight_packed else wq, w_scale, gs, grad_out.dtype, rotate_back=convrot)
         gx = g2d @ w  # [M, K]
     return gx.reshape(*grad_out.shape[:-1], wq.shape[1])
 
@@ -477,7 +494,7 @@ def _dequantize_weight(wq: torch.Tensor, w_scale: torch.Tensor, groupsize: int, 
 
 
 @convrot_int8_linear_backward.register_fake
-def _convrot_int8_linear_backward_fake(grad_out, wq, w_scale, groupsize, convrot, bwd_mode):
+def _convrot_int8_linear_backward_fake(grad_out, wq, w_scale, groupsize, convrot, bwd_mode, weight_packed):
     return grad_out.new_empty(*grad_out.shape[:-1], wq.shape[1])
 
 
@@ -485,9 +502,9 @@ def _convrot_int8_linear_backward(ctx, grad_out):
     wq, w_scale = ctx.saved_tensors
     grad_x = None
     if ctx.needs_input_grad[0]:
-        grad_x = convrot_int8_linear_backward(grad_out, wq, w_scale, ctx.groupsize, ctx.convrot, ctx.bwd_mode)
+        grad_x = convrot_int8_linear_backward(grad_out, wq, w_scale, ctx.groupsize, ctx.convrot, ctx.bwd_mode, ctx.weight_packed)
     grad_bias = grad_out.reshape(-1, grad_out.shape[-1]).sum(dim=0) if ctx.needs_input_grad[3] else None
-    return grad_x, None, None, grad_bias, None, None, None
+    return grad_x, None, None, grad_bias, None, None, None, None
 
 
 convrot_int8_linear.register_autograd(_convrot_int8_linear_backward, setup_context=_convrot_int8_linear_setup_context)
@@ -502,7 +519,7 @@ def convrot_int8_linear_forward_patch(self: nn.Linear, x):
         x = x.to(cast_dtype)
         if bias is not None:
             bias = bias.to(cast_dtype)
-    return convrot_int8_linear(x, self.weight, self.scale_weight, bias, self._convrot_groupsize, True, self._convrot_bwd_mode)
+    return convrot_int8_linear(x, self.weight, self.scale_weight, bias, self._convrot_groupsize, True, self._convrot_bwd_mode, self._convrot_weight_packed)
 
 
 def convrot_int8_embedding_forward_patch(self: nn.Embedding, input: torch.Tensor) -> torch.Tensor:
@@ -533,7 +550,34 @@ def _validate_convrot_bwd_mode(bwd_mode: str) -> None:
 def _patch_convrot_int8_linear(module: nn.Linear, groupsize: int, bwd_mode: str) -> None:
     module._convrot_groupsize = groupsize
     module._convrot_bwd_mode = bwd_mode
+    module._convrot_weight_packed = False  # set by _pack_convrot_int8_weights once the state dict is loaded
     module.forward = convrot_int8_linear_forward_patch.__get__(module, type(module))
+
+
+def _pack_convrot_int8_weights(model: nn.Module) -> None:
+    """Reorder the loaded int8 Linear weights into feather-ops' prepacked layout.
+
+    Runs once per `load_state_dict` (registered as a post hook by `apply_convrot_int8_monkey_patch`) because the
+    bytes only exist after the load. The permutation keeps the `[N, K]` shape, so nothing that inspects the weight
+    shape (LoRA creation, state dict matching) changes, and modules whose shape cannot be packed keep the released
+    layout and stay on the Triton kernel.
+    """
+    packed_count = 0
+    for module in model.modules():
+        if not isinstance(module, nn.Linear) or not hasattr(module, "_convrot_weight_packed"):
+            continue
+        module._convrot_weight_packed = False
+        weight = module.weight
+        if weight.dim() != 2 or weight.dtype != torch.int8:
+            continue
+        packed = prepare_int8_weight(weight.detach())
+        if packed is weight:
+            continue
+        module.weight.data = packed
+        module._convrot_weight_packed = True
+        packed_count += 1
+    if packed_count:
+        logger.info(f"Prepacked {packed_count} ConvRot INT8 weights for the feather-ops int8 GEMM")
 
 
 def _patch_convrot_int8_embedding(module: nn.Embedding, groupsize: int, embedding_dtype: torch.dtype) -> None:
@@ -605,7 +649,10 @@ def apply_convrot_int8_monkey_patch(
     logger.info(
         f"Number of ConvRot INT8 monkey-patched modules: {len(patched_paths)}"
         + (f" (including {embedding_count} embeddings)" if embedding_count else "")
+        + f", INT8 linear backend: {int8_linear_backend() or 'unavailable'}"
     )
+    if int8_linear_backend() == "feather-ops":
+        model.register_load_state_dict_post_hook(lambda module, incompatible_keys: _pack_convrot_int8_weights(module))
     return model
 
 

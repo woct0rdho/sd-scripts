@@ -6,6 +6,7 @@ from typing import Any, Optional, Union
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
+from library import convrot_int8_utils
 from library.device_utils import init_ipex, clean_memory_on_device
 from library.custom_offloading_utils import BlockSwapConfig
 
@@ -77,7 +78,7 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
                     "--convrot_int8_bwd int8 requires triton (triton-windows on Windows)"
                     " / --convrot_int8_bwd int8 には triton（Windowsではtriton-windows）が必要です"
                 )
-            if not args.convrot_int8:
+            if not args.convrot_int8 and not convrot_int8_utils.is_convrot_int8_checkpoint(args.pretrained_model_name_or_path):
                 logger.warning(
                     "--convrot_int8_bwd int8 only takes effect with a ConvRot INT8 base (--convrot_int8 or a pre-quantized"
                     " *_int8_convrot checkpoint)"

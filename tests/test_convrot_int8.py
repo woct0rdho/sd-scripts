@@ -28,13 +28,13 @@ requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA r
 requires_triton = pytest.mark.skipif(not kernels.HAS_TRITON, reason="triton required")
 
 
-def _apply(x, wq, ws, b, groupsize, bwd_mode):
+def _apply(x, wq, ws, b, groupsize, bwd_mode, weight_packed=False):
     """Direct call of the custom op, with the autocast cast of the patched forward."""
     if torch.is_autocast_enabled(x.device.type):
         cast_dtype = torch.get_autocast_dtype(x.device.type)
         x = x.to(cast_dtype)
         b = b.to(cast_dtype) if b is not None else None
-    return utils.convrot_int8_linear(x, wq, ws, b, groupsize, True, bwd_mode)
+    return utils.convrot_int8_linear(x, wq, ws, b, groupsize, True, bwd_mode, weight_packed)
 
 
 def _relerr(a, b):
@@ -166,7 +166,7 @@ def test_backward_eager_cpu_without_rotation_is_plain_dequant_matmul():
     """convrot=False backward (weight in the original basis): grad_x = g @ (scale * W)."""
     wq, ws, _, _ = _make_quantized_linear("cpu", torch.float32)
     g = torch.randn(3, M, N)
-    out = utils.convrot_int8_linear_backward(g, wq, ws, GS, False, "bf16")
+    out = utils.convrot_int8_linear_backward(g, wq, ws, GS, False, "bf16", False)
     assert _relerr(out, g @ (wq.float() * ws)) < 1e-6
 
 
@@ -222,6 +222,37 @@ def test_triton_dequantize_rotate_weight_matches_eager(groupsize, rows):
     assert _relerr(out, ref) < 5e-3  # bf16 rounding of the dequantized values before the Hadamard dot
     eager = kernels._rotate_weight(wq * ws.to(torch.bfloat16), kernels._build_hadamard(groupsize, "cuda", torch.bfloat16), groupsize)
     assert _relerr(eager, ref) < 5e-3 and _relerr(out, eager) < 5e-3  # the eager fallback rounds the same way
+
+
+@requires_cuda
+@requires_triton
+@pytest.mark.skipif(not kernels.feather_ops_int8_available(), reason="feather-ops int8 GEMM not available")
+def test_feather_ops_packed_weight_is_lossless_and_matches_the_plain_path():
+    """The prepacked layout is a permutation of the released bytes, so both backends must agree."""
+    wq, ws, w_deq, b = _make_quantized_linear("cuda", torch.bfloat16, bias=True)
+    packed = kernels.prepare_int8_weight(wq)
+    assert packed.shape == wq.shape and packed.dtype == torch.int8
+    assert torch.equal(kernels.released_int8_weight(packed), wq)
+
+    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    out_packed = _apply(x, packed, ws, b, GS, "bf16", weight_packed=True)
+    ref = F.linear(x, w_deq, b)
+    assert _relerr(out_packed, ref) < 2e-2
+    # the weight bytes are identical (the round trip above proves it), but the two backends produce the int8
+    # activation with different summation orders (Triton matmul vs feather-ops radix-4), so their outputs agree
+    # to the activation quantization noise rather than bit for bit
+    assert _relerr(out_packed, _apply(x, wq, ws, b, GS, "bf16")) < 2e-2
+
+    # the input gradient reads the same copy instead of transposing the weight per call
+    g = torch.randn(3, M, N, device="cuda", dtype=torch.bfloat16)
+    grad_packed = utils.convrot_int8_linear_backward(g, packed, ws, GS, True, "int8", True)
+    grad_plain = utils.convrot_int8_linear_backward(g, wq, ws, GS, True, "int8", False)
+    assert _relerr(grad_packed, grad_plain) < 2e-2
+
+    # the dequantizing backward unpacks first and must land on exactly the same weight, so this one is bit-exact
+    grad_bf16_packed = utils.convrot_int8_linear_backward(g, packed, ws, GS, True, "bf16", True)
+    grad_bf16_plain = utils.convrot_int8_linear_backward(g, wq, ws, GS, True, "bf16", False)
+    assert torch.equal(grad_bf16_packed, grad_bf16_plain)
 
 
 @requires_cuda

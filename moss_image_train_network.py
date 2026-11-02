@@ -79,7 +79,9 @@ class MossImageNetworkTrainer(train_network.NetworkTrainer):
                 "--convrot_int8_bwd int8 requires triton (triton-windows on Windows)"
                 " / --convrot_int8_bwd int8 には triton（Windows では triton-windows）が必要です"
             )
-            if not (args.convrot_int8 or args.convrot_int8_text_encoder):
+            if not (args.convrot_int8 or args.convrot_int8_text_encoder) and not convrot_int8_utils.is_convrot_int8_checkpoint(
+                args.pretrained_model_name_or_path
+            ):
                 logger.info(
                     "--convrot_int8_bwd int8 only takes effect with a ConvRot INT8 base (--convrot_int8, --convrot_int8_text_encoder"
                     " or a pre-quantized checkpoint)"
