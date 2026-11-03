@@ -82,7 +82,8 @@ Options match `train_network.py`:
 *   `--max_grad_norm=N`: Gradient clipping threshold. Clips gradients if their norm exceeds N. Default is 1.0. `0` disables it.
 *   `--gradient_checkpointing`: Significantly reduces memory usage but slightly decreases training speed. Recommended for SDXL due to high memory consumption.
 *   `--fused_backward_pass`: **Experimental**: Fuses gradient calculation and optimizer steps to reduce VRAM usage. Available for SDXL. Currently only supports `Adafactor` optimizer. Cannot be used with Gradient Accumulation.
-*   `--resume=\"<state directory>\"`: Resumes training from a saved state (saved with `--save_state`). Restores optimizer state, step count, etc.
+*   `--resume=\"<state directory>\"`: Resumes training from a saved state (saved with `--save_state`). Restores optimizer state, step count, etc. Without `--deterministic_dataloader` the dataloader is replayed and the epoch's batch order is redrawn, so the resumed run continues the same training *distribution* but not the same sample sequence; add `--skip_until_initial_step` to replay the already trained batches instead of starting the epoch over. Every tracker is keyed by `global_step`, so a resumed run's wandb history (a separate run, as usual) starts at the step the state was saved at instead of 0.
+*   `--deterministic_dataloader`: Draws the training order from `(seed, epoch)` instead of the global RNG, and records the position inside the epoch in the state saved by `--save_state` (the position is cross-checked against the saved step count, so states written by older versions still resume at the right batch). `--resume` then seeks to that position: no batch is replayed or repeated, and because the global RNG stream is not advanced by the replay, the noise/timestep and caption-shuffling randomness continues exactly where the interrupted run stopped. Exact with `--max_data_loader_n_workers 0` (with workers the sampler reads ahead of the consumed batches and worker RNG states are not saved); single process only. Use it if you want an aborted run to continue as if it had never stopped; it also makes the batch order reproducible from `--seed` alone.
 
 ### 1.6. Caching
 
@@ -374,7 +375,9 @@ This technique involves merging a pre-trained LoRA into the base model before st
 *   `--fused_backward_pass`
     *   **実験的機能:** 勾配計算とOptimizerのステップを融合し、VRAM使用量を削減します。SDXLで利用可能です。現在 `Adafactor` Optimizerのみ対応。Gradient Accumulationとは併用できません。
 *   `--resume="<stateディレクトリ>"`
-    *   `--save_state`で保存された学習状態から学習を再開します。Optimizerの状態や学習ステップ数などが復元されます。
+    *   `--save_state`で保存された学習状態から学習を再開します。Optimizerの状態や学習ステップ数などが復元されます。`--deterministic_dataloader`なしではDataLoaderを再生するため、エポック内のバッチ順は再抽選され、同じ学習分布ではあるものの同じサンプル列にはなりません。`--skip_until_initial_step`を併用するとエポックの最初からではなく学習済みバッチを読み飛ばします。各トラッカーには`global_step`が渡されるため、再開後のwandb（従来どおり別run）の履歴は0からではなくstateを保存したステップから始まります。
+*   `--deterministic_dataloader`
+    *   学習順序をグローバル乱数ではなく`(seed, epoch)`から決定し、`--save_state`で保存するstateにエポック内の読み込み位置を記録します（位置は保存されたステップ数と照合されるため、古いバージョンが書いたstateでも正しいバッチから再開されます）。`--resume`はその位置にシークするため、バッチの再生・重複がなく、再生でグローバル乱数が進まないのでノイズ・タイムステップ・キャプションシャッフルの乱数も中断前の続きから再開されます。`--max_data_loader_n_workers 0`で正確（ワーカー使用時はサンプラーが先読みし、ワーカーの乱数状態は保存されません）。単一プロセスのみ。中断した学習を「中断がなかったかのように」継続したい場合に使用します。`--seed`だけでバッチ順が再現可能になります。
 
 ### 1.6. キャッシュ機能関連
 

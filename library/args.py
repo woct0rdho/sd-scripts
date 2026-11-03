@@ -354,6 +354,14 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         action="store_true",
         help="persistent DataLoader workers (useful for reduce time gap between epoch, but may use more memory) / DataLoader のワーカーを持続させる (エポック間の時間差を少なくするのに有効だが、より多くのメモリを消費する可能性がある)",
     )
+    parser.add_argument(
+        "--deterministic_dataloader",
+        action="store_true",
+        help="draw the training order from (seed, epoch) instead of the global RNG and record the position in the state "
+        "saved by --save_state, so --resume continues exactly where the run stopped instead of replaying batches "
+        "(exact with --max_data_loader_n_workers 0) / 学習順序を(seed, epoch)から決め、--save_stateで保存するstateに"
+        "読み込み位置を記録する。--resumeでバッチを再生せずに中断した位置から再開できる（--max_data_loader_n_workers 0で正確）",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random seed for training / 学習時の乱数のseed")
     parser.add_argument(
         "--gradient_checkpointing", action="store_true", help="enable gradient checkpointing / gradient checkpointingを有効にする"

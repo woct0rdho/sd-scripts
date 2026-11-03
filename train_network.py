@@ -40,6 +40,7 @@ import library.logging_util as logging_util
 import library.loss as loss_util
 import library.checkpoint_io as checkpoint_io
 import library.feather_conv as feather_conv
+import library.resumable_dataloader as resumable_dataloader
 import library.sampling as sampling
 import library.config_util as config_util
 from library.config_util import (
@@ -156,7 +157,10 @@ class NetworkTrainer:
             logs["epoch"] = epoch
             if val_step is not None:
                 logs["val_step"] = val_step
-            wandb_tracker.log(logs)
+            # wandb starts its own step counter at 0 for every run, so a resumed run (which stays a separate run) would plot
+            # at 0, 1, 2, ... Keying the history by global_step puts it on the same x axis as the run it continues and keeps
+            # validation rows from shifting the training steps.
+            wandb_tracker.log(logs, step=global_step)
 
         for tracker in other_trackers:
             tracker.log(logs, step=step_value)
@@ -1273,13 +1277,31 @@ class NetworkTrainer:
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
 
+        # a deterministic sampler makes the training order a pure function of (seed, epoch) and lets --resume seek to the
+        # saved position instead of replaying batches (library/resumable_dataloader.py)
+        train_sampler = None
+        train_generator = None
+        if args.deterministic_dataloader:
+            train_sampler = resumable_dataloader.DeterministicRandomSampler(train_dataset_group, seed=args.seed, epoch=1)
+            # the dataloader draws one worker seed per epoch from its generator: keep that off the global RNG, otherwise a
+            # resumed run consumes a different number of draws than the uninterrupted one and the noise stream shifts
+            train_generator = torch.Generator()
+            train_generator.manual_seed(args.seed)
+            if n_workers > 0:
+                logger.warning(
+                    "deterministic_dataloader is specified together with data loader workers: the sampler reads ahead of the"
+                    " consumed batches and worker RNG states are not saved, so a resumed position may skip or repeat batches"
+                )
+
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
-            shuffle=True,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            generator=train_generator,
         )
 
         val_dataloader = torch.utils.data.DataLoader(
@@ -1443,7 +1465,18 @@ class NetworkTrainer:
             with open(train_state_file, "w", encoding="utf-8") as f:
                 json.dump({"current_epoch": current_epoch.value, "current_step": current_step.value + 1}, f)
 
+            # the position inside the epoch, so --resume can seek instead of replaying. epoch_batches counts the batches the
+            # loop has trained: the sampler's own counter runs one batch ahead (accelerate's dataloader fetches ahead of the
+            # batch it yields), and only the main process writes the file
+            if train_sampler is not None and accelerator.is_main_process:
+                resumable_dataloader.save_state(
+                    output_dir, train_sampler, current_epoch.value - 1, epoch_batches, accelerator.num_processes
+                )
+
         steps_from_state = None
+        epoch_from_state = None
+        dataloader_state_from_state = None
+        epoch_batches = 0  # batches the loop has trained in the current epoch
 
         def load_model_hook(models, input_dir):
             # remove models except network
@@ -1456,13 +1489,19 @@ class NetworkTrainer:
             # print(f"load model hook: {len(models)} models will be loaded")
 
             # load current epoch and step to
-            nonlocal steps_from_state
+            nonlocal steps_from_state, epoch_from_state, dataloader_state_from_state
             train_state_file = os.path.join(input_dir, "train_state.json")
             if os.path.exists(train_state_file):
                 with open(train_state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 steps_from_state = data["current_step"]
+                epoch_from_state = int(data.get("current_epoch") or 1)
                 logger.info(f"load train state from {train_state_file}: {data}")
+
+            if train_sampler is not None:
+                dataloader_state_from_state = resumable_dataloader.load_state(input_dir)
+                if dataloader_state_from_state is not None:
+                    logger.info(f"load dataloader state from {input_dir}: {dataloader_state_from_state}")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
@@ -1528,8 +1567,10 @@ class NetworkTrainer:
                 initial_step = (args.initial_epoch - 1) * math.ceil(
                     len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
                 )
+            step_from_state = False
         else:
             # if initial_epoch and initial_step are not specified, steps_from_state is used when resuming
+            step_from_state = True
             if steps_from_state is not None:
                 initial_step = steps_from_state
                 steps_from_state = None
@@ -1539,10 +1580,55 @@ class NetworkTrainer:
                 args.max_train_steps > initial_step
             ), f"max_train_steps should be greater than initial step / max_train_stepsは初期ステップより大きい必要があります: {args.max_train_steps} vs {initial_step}"
 
+        # exact resume: with a deterministic sampler and a saved position the first epoch of the resumed run starts at the
+        # batch the interrupted run would have used next, so no batch is replayed and the RNG stream is not offset
+        exact_resume = False
+        # a --resume must not restart from the beginning of the epoch: if the state cannot be seeked to, replay it
+        replay_state_step = bool(args.resume) and initial_step > 0
+        resumed_epoch = 0
+        if step_from_state and initial_step > 0 and train_sampler is not None:
+            if dataloader_state_from_state is None:
+                logger.info(
+                    "no dataloader state in the resumed directory (saved without --deterministic_dataloader?): replaying the"
+                    " dataloader up to the saved step instead of seeking to it"
+                )
+            elif accelerator.num_processes > 1:
+                logger.warning(
+                    "resuming from a dataloader state is only exact with a single process: replaying the dataloader instead"
+                )
+            else:
+                try:
+                    resumed_epoch, resumed_position = resumable_dataloader.resolve_state(
+                        dataloader_state_from_state,
+                        train_sampler,
+                        initial_step,
+                        epoch_from_state,
+                        args.gradient_accumulation_steps,
+                    )
+                    exact_resume = True
+                except ValueError as e:
+                    logger.warning(f"cannot resume from the saved dataloader state ({e}): replaying the dataloader instead")
+
+                if exact_resume:
+                    epoch_batches = resumed_position
+                    logger.info(
+                        f"resume at epoch {resumed_epoch} position {resumed_position}/{train_sampler.num_samples}: "
+                        f"no batches are replayed"
+                    )
+
         epoch_to_start = 0
         if initial_step > 0:
-            if args.skip_until_initial_step:
-                # if skip_until_initial_step is specified, load data and discard it to ensure the same data is used
+            if exact_resume:
+                epoch_to_start = resumed_epoch
+
+                # advance the dataset to the resumed epoch before the loop (its epoch is 1-based): the epoch switch shuffles
+                # the buckets, which consumes the python RNG that was restored with the checkpoint and drives caption
+                # shuffling, so put the RNG state back afterwards
+                python_rng_state = random.getstate()
+                train_dataset_group.set_current_epoch(resumed_epoch + 1)
+                random.setstate(python_rng_state)
+            elif args.skip_until_initial_step or replay_state_step:
+                # load data and discard the batches that were already trained, to continue at the saved step
                 if not args.resume:
                     logger.info(
                         f"initial_step is specified but not resuming. lr scheduler will be started from the beginning / initial_stepが指定されていますがresumeしていないため、lr schedulerは最初から始まります"
@@ -1558,6 +1644,7 @@ class NetworkTrainer:
                 initial_step = 0  # do not skip
 
         global_step = 0
+        skip_batches = 0  # batches of the first epoch that are already trained and have to be skipped (replay path only)
 
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
@@ -1598,11 +1685,14 @@ class NetworkTrainer:
             accelerator.log({}, step=0)
 
         # training loop
-        if initial_step > 0:  # only if skip_until_initial_step is specified
+        if exact_resume:
+            global_step = initial_step
+        elif initial_step > 0:  # only if skip_until_initial_step is specified
             for skip_epoch in range(epoch_to_start):  # skip epochs
                 logger.info(f"skipping epoch {skip_epoch+1} because initial_step (multiplied) is {initial_step}")
                 initial_step -= len(train_dataloader)
             global_step = initial_step
+            skip_batches = initial_step
 
         # log device and dtype for each model
         logger.info(f"unet dtype: {unet_weight_dtype}, device: {unet.device}")
@@ -1615,8 +1705,14 @@ class NetworkTrainer:
 
         clean_memory_on_device(accelerator.device)
 
+        # the bar counts absolute steps (starting at global_step, which is the resumed step count on --resume) so it matches
+        # the step numbers in the logs, the metadata and the checkpoint file names
         progress_bar = tqdm(
-            range(args.max_train_steps - initial_step), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps"
+            total=args.max_train_steps,
+            initial=min(global_step, args.max_train_steps),
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc="steps",
         )
 
         validation_steps = (
@@ -1662,6 +1758,9 @@ class NetworkTrainer:
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}\n")
             current_epoch.value = epoch + 1
+            epoch_batches = 0
+            if train_sampler is not None and train_sampler.epoch != epoch:
+                train_sampler.set_epoch_position(epoch)
 
             self._metadata["ss_epoch"] = str(epoch + 1)
 
@@ -1669,15 +1768,16 @@ class NetworkTrainer:
 
             # TRAINING
             skipped_dataloader = None
-            if initial_step > 0:
-                skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
-                initial_step = 1
+            if skip_batches > 0:
+                skipped_dataloader = accelerator.skip_first_batches(train_dataloader, skip_batches - 1)
+                skip_batches = 1
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
                 current_step.value = global_step
-                if initial_step > 0:
-                    initial_step -= 1
+                if skip_batches > 0:
+                    skip_batches -= 1
                     continue
+                epoch_batches += 1
 
                 with accelerator.accumulate(training_model):
                     on_step_start_for_network(text_encoder, unet)
