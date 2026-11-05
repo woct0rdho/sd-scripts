@@ -72,7 +72,7 @@ def test_patch_is_a_noop_on_the_torch_backend(patch_backend):
     patch_backend("torch")
     model = VaeLike()
     before = [type(m) for m in model.modules()]
-    assert feather_conv.patch_conv_modules(model) == {"candidates": 0, "patched": 0}
+    assert feather_conv.patch_conv_modules(model) == 0
     assert [type(m) for m in model.modules()] == before
     assert not feather_conv.is_patched(model)
 
@@ -84,9 +84,9 @@ def test_patch_relabels_only_the_eligible_convs(patch_backend):
     state_keys = list(model.state_dict().keys())
     params = {name: param for name, param in model.named_parameters()}
 
-    stats = feather_conv.patch_conv_modules(model)
+    patched = feather_conv.patch_conv_modules(model)
 
-    assert stats == {"candidates": 4, "patched": 4}  # conv_in, block[0], block[2], conv_out
+    assert patched == 4  # conv_in, block[0], block[2], conv_out
     for module in (conv_in, conv1, conv2, model.conv_out):
         assert isinstance(module, feather_conv._FeatherConv2dMixin)
         assert isinstance(module, nn.Conv2d)  # the model tree still holds plain convs
@@ -100,8 +100,10 @@ def test_patch_relabels_only_the_eligible_convs(patch_backend):
     assert model.conv_in.weight.dtype == torch.float32
 
     # idempotent, and the relabelled class is cached
-    assert feather_conv.patch_conv_modules(model) == {"candidates": 4, "patched": 0}
-    assert type(model.conv_in) is feather_conv._relabelled(nn.Conv2d)
+    assert feather_conv.patch_conv_modules(model) == 0
+    from feather_ops.modules import relabelled_class
+
+    assert type(model.conv_in) is relabelled_class(nn.Conv2d, feather_conv._FeatherConv2dMixin)
 
 
 def test_patched_model_keeps_load_state_dict_and_forward_shape(patch_backend):
@@ -132,11 +134,11 @@ def test_chunked_conv_padding_is_understood(patch_backend):
 
 @cuda_only
 def test_bf16_3x3_conv_uses_the_kernel(monkeypatch):
-    import feather_ops.conv2d as feather_ops_conv2d
-
+    api = feather_conv._feather_ops
+    assert api is not None
     calls = []
-    real = feather_ops_conv2d.conv3x3_prepacked
-    monkeypatch.setattr(feather_ops_conv2d, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    real = api.conv3x3_prepacked
+    monkeypatch.setattr(api, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
 
     module = conv3x3(64, 128).cuda().to(torch.bfloat16)
     feather_conv.patch_conv_modules(module)
@@ -152,11 +154,11 @@ def test_bf16_3x3_conv_uses_the_kernel(monkeypatch):
 
 @cuda_only
 def test_fp16_is_delegated_to_miopen(monkeypatch):
-    import feather_ops.conv2d as feather_ops_conv2d
-
+    api = feather_conv._feather_ops
+    assert api is not None
     calls = []
-    real = feather_ops_conv2d.conv3x3_prepacked
-    monkeypatch.setattr(feather_ops_conv2d, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    real = api.conv3x3_prepacked
+    monkeypatch.setattr(api, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
 
     module = conv3x3(64, 128).cuda().to(torch.float16)
     feather_conv.patch_conv_modules(module)
@@ -172,13 +174,13 @@ def test_fp16_is_delegated_to_miopen(monkeypatch):
 
 @cuda_only
 def test_untiled_shapes_are_delegated_to_miopen(monkeypatch):
-    import feather_ops.conv2d as feather_ops_conv2d
-
+    api = feather_conv._feather_ops
+    assert api is not None
     calls = []
-    real = feather_ops_conv2d.conv3x3_prepacked
-    monkeypatch.setattr(feather_ops_conv2d, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    real = api.conv3x3_prepacked
+    monkeypatch.setattr(api, "conv3x3_prepacked", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
 
-    assert feather_ops_conv2d.select_backend(torch.bfloat16, 96, 3, 64, 64) == "miopen"  # no tile divides C_out=3
+    assert api.select_backend(torch.bfloat16, 96, 3, 64, 64) == "miopen"  # no tile divides C_out=3
     module = nn.Conv2d(96, 3, 3, padding=1).cuda().to(torch.bfloat16)
     feather_conv.patch_conv_modules(module)
     x = torch.randn(1, 96, 64, 64, device="cuda", dtype=torch.bfloat16)
@@ -270,11 +272,11 @@ def test_chunked_conv_routes_and_keeps_its_chunking(patch_backend):
 
 @cuda_only
 def test_prepack_is_cached_and_follows_the_weight_version(monkeypatch):
-    import feather_ops.conv2d as feather_ops_conv2d
+    import feather_ops.conv2d_module as conv2d_module
 
     packs = []
-    real = feather_ops_conv2d.prepack_conv2d_weight_3x3
-    monkeypatch.setattr(feather_ops_conv2d, "prepack_conv2d_weight_3x3", lambda *a, **k: (packs.append(1), real(*a, **k))[1])
+    real = conv2d_module.prepack_conv2d_weight_3x3
+    monkeypatch.setattr(conv2d_module, "prepack_conv2d_weight_3x3", lambda *a, **k: (packs.append(1), real(*a, **k))[1])
 
     module = conv3x3(32, 64).cuda().to(torch.bfloat16)
     feather_conv.patch_conv_modules(module)
@@ -308,16 +310,16 @@ def test_prepack_is_cached_and_follows_the_weight_version(monkeypatch):
 def test_backend_env(monkeypatch):
     from library import feather_conv as module
 
-    monkeypatch.setattr(module, "_backend_logged", False, raising=False)
+    module.conv_backend.cache_clear()
     monkeypatch.setenv(feather_conv.BACKEND_ENV, "torch")
     assert module.conv_backend() == "torch"
 
-    monkeypatch.setattr(module, "_backend_logged", False, raising=False)
+    module.conv_backend.cache_clear()
     monkeypatch.setenv(feather_conv.BACKEND_ENV, "bogus")
     with pytest.raises(ValueError, match="unknown"):
         module.conv_backend()
 
-    monkeypatch.setattr(module, "_backend_logged", False, raising=False)
+    module.conv_backend.cache_clear()
     monkeypatch.setenv(feather_conv.BACKEND_ENV, "auto")
     expected = "feather-ops" if module.feather_conv_available() else "torch"
     assert module.conv_backend() == expected
@@ -326,7 +328,7 @@ def test_backend_env(monkeypatch):
 def test_feather_ops_backend_is_required_when_requested(monkeypatch):
     from library import feather_conv as module
 
-    monkeypatch.setattr(module, "_backend_logged", False, raising=False)
+    module.conv_backend.cache_clear()
     monkeypatch.setattr(module, "feather_conv_available", lambda: False)
     monkeypatch.setenv(feather_conv.BACKEND_ENV, "feather-ops")
     with pytest.raises(RuntimeError, match="not usable"):
@@ -339,8 +341,7 @@ def test_patch_on_the_real_extension_with_bf16_vae():
         pytest.skip("feather_ops.conv2d is not available")
     torch.manual_seed(0)
     model = VaeLike().cuda().to(torch.bfloat16)
-    stats = feather_conv.patch_conv_modules(model)
-    assert stats["patched"] == 4
+    assert feather_conv.patch_conv_modules(model) == 4
     x = torch.randn(1, 16, 32, 32, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         out = model(x)

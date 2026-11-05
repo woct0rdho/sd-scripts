@@ -41,6 +41,7 @@ quantization error.
 
 import math
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -633,14 +634,30 @@ FEATHER_OPS_BACKEND_ENV = "SD_SCRIPTS_CONVROT_INT8_BACKEND"
 
 
 def _import_feather_ops():
-    """The feather_ops extension, or None when it is not installed / not built / not a ROCm build."""
+    """The feather_ops entry points sd-scripts uses, or None when it is not installed / not built / not ROCm."""
     if not getattr(torch.version, "hip", None):
         return None
     try:
-        import feather_ops
+        from feather_ops import (
+            convrot_int8_dgrad,
+            convrot_int8_linear,
+            quantize_convrot_activation,
+            int8_scaled_mm,
+            prepack_int8_weight,
+            unpack_int8_weight,
+        )
+        from feather_ops.int8_convrot import convrot_int8_supported
     except Exception:  # not installed, or the HIP extension failed to load
         return None
-    return feather_ops
+    return SimpleNamespace(
+        convrot_int8_dgrad=convrot_int8_dgrad,
+        convrot_int8_linear=convrot_int8_linear,
+        convrot_int8_supported=convrot_int8_supported,
+        quantize_convrot_activation=quantize_convrot_activation,
+        int8_scaled_mm=int8_scaled_mm,
+        prepack_int8_weight=prepack_int8_weight,
+        unpack_int8_weight=unpack_int8_weight,
+    )
 
 
 _feather_ops = _import_feather_ops()
@@ -677,11 +694,11 @@ def prepare_int8_weight(weight: torch.Tensor) -> torch.Tensor:
     if not feather_ops_int8_available():
         return weight
     n, k = weight.shape
-    # both axes must be a multiple of the micro-tile (4) and of the MMA reduction step (16): the forward
-    # contracts k and the backward contracts n, so either one can be the reduction axis
-    if n % 16 != 0 or k % 16 != 0:
-        return weight  # not representable, the Triton path handles this weight
-    return _feather_ops.prepack_int8_convrot_weight(weight.contiguous()).reshape(n, k)
+    # both axes have to be a multiple of the MMA reduction step of one of the two directions; feather_ops owns
+    # that rule once, and a weight it rejects is not representable and stays on the Triton path
+    if not _feather_ops.convrot_int8_supported((n, k))[0]:
+        return weight
+    return _feather_ops.prepack_int8_weight(weight.contiguous()).reshape(n, k)
 
 
 def released_int8_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -689,9 +706,9 @@ def released_int8_weight(weight: torch.Tensor) -> torch.Tensor:
     if not feather_ops_int8_available():
         return weight
     n, k = weight.shape
-    if n % 16 != 0 or k % 16 != 0:
+    if not _feather_ops.convrot_int8_supported((n, k))[0]:
         return weight
-    return _feather_ops.unpack_int8_convrot_weight(weight.reshape(k // 4, n // 4, 4, 4))
+    return _feather_ops.unpack_int8_weight(weight.reshape(k // 4, n // 4, 4, 4))
 
 
 def quantize_convrot_activation(
@@ -717,7 +734,7 @@ def quantize_convrot_activation(
         (int8 [M, K], fp32 [M]) quantized values and their per-row scale.
     """
     if _feather_ops is not None and x.is_cuda and convrot_groupsize == 256 and x.shape[-1] % 256 == 0:
-        return _feather_ops.convrot_quantize_activation(x, rotate=convrot, col_scale=col_scale)
+        return _feather_ops.quantize_convrot_activation(x, rotate=convrot, col_scale=col_scale)
     if col_scale is not None:
         x = (x * col_scale.reshape(1, -1).to(x.dtype)).to(x.dtype)
     if convrot:
@@ -736,10 +753,9 @@ def _feather_ops_int8_linear(
     convrot_groupsize: int,
 ) -> torch.Tensor:
     """Forward: rotate, quantize per row, int8 GEMM with the dequantization epilogue."""
-    x_2d = x.reshape(-1, x.shape[-1])
-    x_int8, x_scale = quantize_convrot_activation(x_2d, convrot, convrot_groupsize)
-    out = _feather_ops.int8_scaled_mm(x_int8, weight, x_scale, weight_scale.reshape(-1), bias, out_dtype, False)
-    return out.reshape(*x.shape[:-1], weight.shape[0])
+    return _feather_ops.convrot_int8_linear(
+        x, weight, weight_scale, bias, out_dtype, convrot_groupsize, convrot, weight_packed=True
+    )
 
 
 def _feather_ops_int8_dgrad(
@@ -755,14 +771,19 @@ def _feather_ops_int8_dgrad(
     The GEMM contracts the weight's *output* axis, so the per-output-channel scale cannot be applied after the sum;
     folding it into the row-wise quantization is the same identity torchao uses for `B.T` scaling.
     """
+    if grad_out.shape[-1] % convrot_groupsize == 0:
+        return _feather_ops.convrot_int8_dgrad(
+            grad_out, weight, weight_scale, out_dtype, convrot_groupsize, convrot, weight_packed=True
+        )
+    # the fused quantizer works in whole groups; a narrower output axis (the text encoders) needs the plain
+    # row quantizer, which is what `quantize_convrot_activation` falls back to
     grad_2d = grad_out.reshape(-1, grad_out.shape[-1])
-    # the weight's per-output-channel scale is folded into the quantizer; it cannot be applied after the sum
     grad_int8, grad_scale = quantize_convrot_activation(grad_2d, False, convrot_groupsize, col_scale=weight_scale)
     out = _feather_ops.int8_scaled_mm(grad_int8, weight, grad_scale, None, None, out_dtype, True)
     if convrot:
         h = _build_hadamard(convrot_groupsize, device=out.device, dtype=out.dtype)
         out = _rotate_activation(out, h, convrot_groupsize)
-    return out.reshape(*grad_out.shape[:-1], weight.shape[1])
+    return out.reshape(*grad_out.shape[:-1], weight.numel() // grad_out.shape[-1])
 
 
 def int8_linear(
