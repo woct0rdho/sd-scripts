@@ -22,6 +22,7 @@ from library import (
     strategy_sdxl,
 )
 import library.accelerator_setup as accelerator_setup
+import library.feather_conv as feather_conv
 import library.args as args_util
 import library.dataset as dataset_util
 import library.model_io as model_io
@@ -167,6 +168,10 @@ def cache_to_disk(args: argparse.Namespace) -> None:
     if is_sd or is_sdxl:
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
+
+    vae_dtype = accelerator_setup.resolve_vae_dtype(args, vae_dtype)
+    # the same relabel the trainers do, so the cache the training scripts reuse is built with the conv kernel
+    feather_conv.patch_conv_modules(vae, "vae")
 
     vae.to(accelerator.device, dtype=vae_dtype)
     vae.requires_grad_(False)

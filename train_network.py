@@ -39,6 +39,7 @@ from library.model_io import SS_METADATA_MINIMUM_KEYS
 import library.logging_util as logging_util
 import library.loss as loss_util
 import library.checkpoint_io as checkpoint_io
+import library.feather_conv as feather_conv
 import library.sampling as sampling
 import library.config_util as config_util
 from library.config_util import (
@@ -1111,6 +1112,12 @@ class NetworkTrainer:
         if vae_dtype is None:
             vae_dtype = vae.dtype
             logger.info(f"vae_dtype is set to {vae_dtype} by the model since cast_vae() is false")
+
+        vae_dtype = accelerator_setup.resolve_vae_dtype(args, vae_dtype)
+
+        # both the latent caching (encode) and the sample images (decode) run through this object, so relabelling the
+        # convs once here covers them; the modules keep their weights, names and state_dict keys
+        feather_conv.patch_conv_modules(vae, "vae")
 
         # text_encoder is List[CLIPTextModel] or CLIPTextModel
         text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]

@@ -365,6 +365,17 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="Number of updates steps to accumulate before performing a backward/update pass / 学習時に逆伝播をする前に勾配を合計するステップ数",
     )
     parser.add_argument(
+        "--vae_dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="dtype of the VAE, which is where the conv kernel runs: 'auto' uses the mixed precision dtype (fp32 with"
+        " --no_half_vae and for models that pin the VAE to fp32). bf16 runs the feather kernel, fp16 and the shapes the"
+        " kernel cannot tile are delegated to MIOpen. Changing it changes the cached latents"
+        " / VAEのdtype（convカーネルが動く場所）。autoはmixed precisionのdtype（--no_half_vae時やVAEをfp32に固定するモデルでは"
+        "fp32）。bf16がfeatherカーネル、fp16とカーネルがタイルできない形状はMIOpenに委譲される。変更するとキャッシュ済みlatentが変わる",
+    )
+    parser.add_argument(
         "--mixed_precision",
         type=str,
         default="no",

@@ -189,7 +189,9 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--text_encoder="<path to Qwen3.5-9B>"` **[Required]**
   - Path to the Qwen3.5-9B text encoder: the first shard of the official format, or the ComfyUI ConvRot INT8 file. The text encoder is always run in bf16 (or ConvRot INT8).
 * `--vae="<path to FLUX.2 VAE>"` **[Required]**
-  - Path to the FLUX.2 VAE (`flux2-vae.safetensors` in ComfyUI / BFL format, or the diffusers format). The VAE is always run in fp32.
+  - Path to the FLUX.2 VAE (`flux2-vae.safetensors` in ComfyUI / BFL format, or the diffusers format). The VAE is run in fp32 unless `--vae_dtype` says otherwise.
+* `--vae_dtype={auto,fp32,fp16,bf16}`
+  - `auto` (default) keeps the fp32 the model pins, so the VAE's 3x3 convolutions stay on torch. `bf16` puts all 55 of them on the feather-ops HIP kernel (with [feather-ops](https://github.com/woct0rdho/feather-ops) installed): at 1024x1024, encode 464 -> 344 ms and decode 517 -> 367 ms (1.35x / 1.41x), at bf16 precision (~1e-2 relative against fp32, the same order as other bf16 VAEs). `fp16` does *not* help here: sd-scripts already runs its `F.conv2d` through MIOpen (unlike ComfyUI, which disables cuDNN on AMD), and the wrapper delegates fp16 to that same MIOpen path, so it measures identical to torch. `--vae_dtype` changes the cached latents, so set it before caching rather than in the middle of a run.
 
 #### Model Options [Optional] / モデル関連 [オプション]
 
@@ -257,7 +259,8 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 
 * `--pretrained_model_name_or_path="<path to MOSS-Image DiT>"` **[必須]** - DiT のチェックポイント。公式 diffusers 形式の最初の分割ファイル、または ComfyUI 向けの単一ファイル（bf16 または ConvRot INT8）。ConvRot INT8 のファイルは自動判別されます。
 * `--text_encoder="<path to Qwen3.5-9B>"` **[必須]** - Qwen3.5-9B テキストエンコーダー。公式形式の最初の分割ファイル、または ComfyUI 向けの ConvRot INT8 ファイル。テキストエンコーダーは常に bf16（または ConvRot INT8）で動作します。
-* `--vae="<path to FLUX.2 VAE>"` **[必須]** - FLUX.2 VAE（ComfyUI / BFL 形式の `flux2-vae.safetensors`、または diffusers 形式）。VAE は常に fp32 で動作します。
+* `--vae="<path to FLUX.2 VAE>"` **[必須]** - FLUX.2 VAE（ComfyUI / BFL 形式の `flux2-vae.safetensors`、または diffusers 形式）。`--vae_dtype` を指定しない限り VAE は fp32 で動作します。
+* `--vae_dtype={auto,fp32,fp16,bf16}` - `auto`（デフォルト）はモデルが固定する fp32 を維持するため、VAE の 3x3 畳み込みは torch のままです。`bf16` にすると 55 個すべてが feather-ops の HIP カーネルで実行されます（[feather-ops](https://github.com/woct0rdho/feather-ops) が必要）。1024x1024 で encode 464→344ms、decode 517→367ms（1.35x/1.41x）、精度は bf16（fp32 に対して相対約1e-2で、他の bf16 VAE と同程度）。`fp16` は効果がありません: sd-scripts の `F.conv2d` は既に MIOpen を使い（AMD で cuDNN を無効化する ComfyUI とは異なります）、ラッパーも fp16 を同じ MIOpen 経路へ委譲するため torch と同一になります。`--vae_dtype` はキャッシュ済み latent を変えるので、学習の途中ではなくキャッシュ前の最初に指定してください。
 
 #### モデル関連 [オプション]
 

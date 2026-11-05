@@ -44,6 +44,7 @@ import library.optimizer as optimizer_util
 import library.logging_util as logging_util
 import library.loss as loss_util
 import library.checkpoint_io as checkpoint_io
+import library.feather_conv as feather_conv
 import library.sampling as sampling
 import library.config_util as config_util
 from library.config_util import ConfigSanitizer, BlueprintGenerator
@@ -469,6 +470,7 @@ def train(args):
     # VAE
     logger.info("Loading Anima VAE...")
     vae = anima_train_utils.load_qwen_image_vae(args, device="cpu", disable_mmap=True)
+    feather_conv.patch_conv_modules(vae, "vae")
 
     if cache_latents:
         vae.to(accelerator.device, dtype=weight_dtype)

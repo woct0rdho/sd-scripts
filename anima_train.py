@@ -30,6 +30,7 @@ import library.optimizer as optimizer_util
 import library.logging_util as logging_util
 import library.loss as loss_util
 import library.checkpoint_io as checkpoint_io
+import library.feather_conv as feather_conv
 import library.sampling as sampling
 
 from library.utils import setup_logging, add_logging_arguments
@@ -237,6 +238,8 @@ def train(args):
     # Load VAE and cache latents
     logger.info("Loading Anima VAE...")
     vae = anima_train_utils.load_qwen_image_vae(args, device="cpu", disable_mmap=True)
+    # one relabel covers the latent caching below and the sample image decoding later on
+    feather_conv.patch_conv_modules(vae, "vae")
 
     if cache_latents:
         vae.to(accelerator.device, dtype=weight_dtype)

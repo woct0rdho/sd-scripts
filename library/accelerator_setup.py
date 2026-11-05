@@ -204,6 +204,24 @@ def prepare_dtype(args: argparse.Namespace):
     return weight_dtype, save_dtype
 
 
+VAE_DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+
+
+def resolve_vae_dtype(args: argparse.Namespace, vae_dtype: torch.dtype) -> torch.dtype:
+    """The VAE dtype the model chose, unless `--vae_dtype` overrides it.
+
+    `auto` keeps the model's choice: the mixed precision dtype, or fp32 with `--no_half_vae` and for models that pin
+    the VAE to fp32 (MOSS). bf16 is what puts the VAE convolutions on the feather kernel.
+    """
+    requested = getattr(args, "vae_dtype", "auto")
+    if requested in (None, "auto"):
+        return vae_dtype
+    resolved = VAE_DTYPES[requested]
+    if resolved != vae_dtype:
+        logger.info(f"vae_dtype is overridden from {vae_dtype} to {resolved} by --vae_dtype")
+    return resolved
+
+
 def patch_accelerator_for_fp16_training(accelerator):
 
     from accelerate import DistributedType
