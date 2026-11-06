@@ -729,15 +729,52 @@ class BaseDataset(torch.utils.data.Dataset):
         self.image_data[info.image_key] = info
         self.image_to_subset[info.image_key] = subset
 
+    def remove_images(self, image_keys, reason: str = "invalid image", log_each: bool = True) -> None:
+        """Remove images from the dataset and update the image counts of the subsets."""
+        for image_key in image_keys:
+            info = self.image_data.pop(image_key, None)
+            self.image_to_subset.pop(image_key, None)
+            if info is not None and log_each:
+                logger.warning(f"skipping {reason}: {info.absolute_path}")
+
+        self.recount_images()
+
+    def recount_images(self) -> None:
+        """Recalculate num_train_images/num_reg_images and subset img_count from image_data."""
+        if hasattr(self, "num_train_images"):
+            self.num_train_images = sum(info.num_repeats for info in self.image_data.values() if not info.is_reg)
+            self.num_reg_images = sum(info.num_repeats for info in self.image_data.values() if info.is_reg)
+
+        for subset in self.subsets:
+            subset.img_count = 0
+        for subset in self.image_to_subset.values():
+            subset.img_count += 1
+
+    def drop_invalid_images(self) -> int:
+        """Drop images whose size cannot be determined (e.g. corrupted image files). Returns the number dropped."""
+        invalid_image_keys = []
+        for image_key, info in self.image_data.items():
+            # also re-check an invalid size, e.g. (0, 0) stored in metadata_cache.json for a file that was broken before
+            if info.image_size is None or info.image_size[0] <= 0 or info.image_size[1] <= 0:
+                info.image_size = self.get_image_size(info.absolute_path)
+            if info.image_size is None or info.image_size[0] <= 0 or info.image_size[1] <= 0:
+                invalid_image_keys.append(image_key)
+
+        if len(invalid_image_keys) > 0:
+            logger.warning(
+                f"skipping {len(invalid_image_keys)} images with invalid size / サイズを取得できない画像をスキップします"
+            )
+            self.remove_images(invalid_image_keys, reason="image with invalid size")
+
+        return len(invalid_image_keys)
+
     def make_buckets(self):
         """
         bucketingを行わない場合も呼び出し必須（ひとつだけbucketを作る）
         min_size and max_size are ignored when enable_bucket is False
         """
         logger.info("loading image sizes.")
-        for info in tqdm(self.image_data.values()):
-            if info.image_size is None:
-                info.image_size = self.get_image_size(info.absolute_path)
+        self.drop_invalid_images()
 
         # # run in parallel
         # max_workers = min(os.cpu_count(), len(self.image_data))  # TODO consider multi-gpu (processes)
@@ -915,15 +952,27 @@ class BaseDataset(torch.utils.data.Dataset):
         num_processes = accelerator.num_processes
         process_index = accelerator.process_index
 
+        failed_image_keys: List[str] = []
+
         # define a function to submit a batch to cache
         def submit_batch(batch, cond):
+            valid_batch = []
             for info in batch:
                 if info.image is not None and isinstance(info.image, Future):
-                    info.image = info.image.result()  # future to image
-            caching_strategy.cache_batch_latents(model, batch, cond.flip_aug, cond.alpha_mask, cond.random_crop)
+                    try:
+                        info.image = info.image.result()  # future to image
+                    except Exception as e:
+                        logger.warning(f"failed to load image, skipping: {info.absolute_path}, error: {e}")
+                        failed_image_keys.append(info.image_key)
+                        continue
+                valid_batch.append(info)
+
+            if len(valid_batch) == 0:
+                return
+            caching_strategy.cache_batch_latents(model, valid_batch, cond.flip_aug, cond.alpha_mask, cond.random_crop)
 
             # remove image from memory
-            for info in batch:
+            for info in valid_batch:
                 info.image = None
 
         # define ThreadPoolExecutor to load images in parallel
@@ -985,6 +1034,25 @@ class BaseDataset(torch.utils.data.Dataset):
 
         finally:
             executor.shutdown()
+
+        # share failures across processes so every process removes the same images and rebuilds its buckets
+        if accelerator.num_processes > 1:
+            image_index = {info.image_key: i for i, info in enumerate(image_infos)}
+            mask = torch.zeros(len(image_infos), dtype=torch.bool, device=accelerator.device)
+            for image_key in failed_image_keys:
+                mask[image_index[image_key]] = True
+            gathered = accelerator.gather(mask).view(accelerator.num_processes, len(image_infos)).any(dim=0)
+            failed_image_keys = [info.image_key for i, info in enumerate(image_infos) if gathered[i].item()]
+
+        if len(failed_image_keys) > 0:
+            logger.warning(
+                f"skipping {len(failed_image_keys)} images that failed to load / 読み込みに失敗した画像をスキップします"
+            )
+            self.remove_images(failed_image_keys, reason="image that failed to load")
+
+            # bucket assignments must be rebuilt without the removed images
+            self.bucket_manager = None
+            self.make_buckets()
 
     def new_cache_text_encoder_outputs(self, models: List[Any], accelerator: Accelerator):
         r"""
@@ -1066,19 +1134,19 @@ class BaseDataset(torch.utils.data.Dataset):
                 caching_strategy.cache_batch_outputs(tokenize_strategy, models, text_encoding_strategy, infos, captions)
 
     def get_image_size(self, image_path):
-        if image_path.endswith(".jxl") or image_path.endswith(".JXL"):
-            return get_jxl_size(image_path)
-        # return imagesize.get(image_path)
-        image_size = imagesize.get(image_path)
-        if image_size[0] <= 0:
-            # imagesize doesn't work for some images, so use PIL as a fallback
-            try:
+        try:
+            if image_path.endswith(".jxl") or image_path.endswith(".JXL"):
+                return get_jxl_size(image_path)
+            # return imagesize.get(image_path)
+            image_size = imagesize.get(image_path)
+            if image_size[0] <= 0:
+                # imagesize doesn't work for some images, so use PIL as a fallback
                 with Image.open(image_path) as img:
                     image_size = img.size
-            except Exception as e:
-                logger.warning(f"failed to get image size: {image_path}, error: {e}")
-                image_size = (0, 0)
-        return image_size
+            return image_size
+        except Exception as e:
+            logger.warning(f"failed to get image size: {image_path}, error: {e}")
+            return (0, 0)
 
     def load_image_with_face_info(self, subset: BaseSubset, image_path: str, alpha_mask=False):
         img = load_image(image_path, alpha_mask)
@@ -1480,11 +1548,25 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
         for dataset in self.datasets:
             dataset.enable_XTI(*args, **kwargs)
 
+    def recount_images(self):
+        self.image_data = {}
+        self.num_train_images = 0
+        self.num_reg_images = 0
+        for dataset in self.datasets:
+            self.image_data.update(dataset.image_data)
+            self.num_train_images += dataset.num_train_images
+            self.num_reg_images += dataset.num_reg_images
+
+        # dataset lengths may have changed (e.g. images failed to load during latent caching),
+        # so ConcatDataset's cumulative sizes must be refreshed before the DataLoader is created
+        self.cumulative_sizes = self.cumsum(self.datasets)
+
     def new_cache_latents(self, model: Any, accelerator: Accelerator):
         for i, dataset in enumerate(self.datasets):
             logger.info(f"[Dataset {i}]")
             dataset.new_cache_latents(model, accelerator)
         accelerator.wait_for_everyone()
+        self.recount_images()
 
     def new_cache_text_encoder_outputs(self, models: List[Any], accelerator: Accelerator):
         for i, dataset in enumerate(self.datasets):

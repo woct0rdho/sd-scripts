@@ -115,6 +115,7 @@ class ControlNetDataset(BaseDataset):
 
         # config_util等から参照される値をいれておく（若干微妙なのでなんとかしたい）
         self.image_data = self.dreambooth_dataset_delegate.image_data
+        self.image_to_subset = self.dreambooth_dataset_delegate.image_to_subset
         self.has_multiple_caption_candidates = self.dreambooth_dataset_delegate.has_multiple_caption_candidates
         self.batch_size = batch_size
         self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
@@ -176,13 +177,33 @@ class ControlNetDataset(BaseDataset):
         super().set_current_strategies()
         return self.dreambooth_dataset_delegate.set_current_strategies()
 
-    def make_buckets(self):
-        self.dreambooth_dataset_delegate.make_buckets()
+    def _sync_delegate_state(self):
+        self.image_data = self.dreambooth_dataset_delegate.image_data
+        self.image_to_subset = self.dreambooth_dataset_delegate.image_to_subset
+        self.num_train_images = self.dreambooth_dataset_delegate.num_train_images
+        self.num_reg_images = self.dreambooth_dataset_delegate.num_reg_images
+        self.has_multiple_caption_candidates = self.dreambooth_dataset_delegate.has_multiple_caption_candidates
+        for subset, source_subset in zip(self.subsets, self.dreambooth_dataset_delegate.subsets):
+            subset.img_count = source_subset.img_count
+
+    def drop_invalid_images(self) -> int:
+        dropped = self.dreambooth_dataset_delegate.drop_invalid_images()
+        self._sync_delegate_state()
+        return dropped
+
+    def _sync_bucket_state(self):
         self.bucket_manager = self.dreambooth_dataset_delegate.bucket_manager
         self.buckets_indices = self.dreambooth_dataset_delegate.buckets_indices
 
+    def make_buckets(self):
+        self.dreambooth_dataset_delegate.make_buckets()
+        self._sync_bucket_state()
+        self._sync_delegate_state()
+
     def new_cache_latents(self, model: Any, accelerator: Accelerator):
         self.dreambooth_dataset_delegate.new_cache_latents(model, accelerator)
+        self._sync_bucket_state()
+        self._sync_delegate_state()
 
         if not self.cache_conditioning_latents:
             return
@@ -222,6 +243,8 @@ class ControlNetDataset(BaseDataset):
                 info.alpha_mask = None
 
             self.dreambooth_dataset_delegate.new_cache_latents(model, accelerator)
+            self._sync_bucket_state()
+            self._sync_delegate_state()
 
             for info in image_infos:
                 info.cond_latents_npz = info.latents_npz

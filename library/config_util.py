@@ -521,18 +521,8 @@ def _filter_dataset_images(dataset, selected_image_paths: set[str]) -> None:
         for image_key, info in source.image_data.items()
         if not info.is_reg and _normalize_image_path(info.absolute_path) not in selected_image_paths
     ]
-    for image_key in keys_to_remove:
-        del source.image_data[image_key]
-        source.image_to_subset.pop(image_key, None)
-
-    # recompute the counts because they may include repeats and regularization images
-    source.num_train_images = sum(info.num_repeats for info in source.image_data.values() if not info.is_reg)
-    source.num_reg_images = sum(info.num_repeats for info in source.image_data.values() if info.is_reg)
-
-    for subset in source.subsets:
-        subset.img_count = 0
-    for subset in source.image_to_subset.values():
-        subset.img_count += 1
+    if len(keys_to_remove) > 0:
+        source.remove_images(keys_to_remove, reason="image not selected", log_each=False)
 
     # unselected images may have been the only ones with multiple caption candidates
     source.has_multiple_caption_candidates = False
@@ -545,11 +535,7 @@ def _filter_dataset_images(dataset, selected_image_paths: set[str]) -> None:
         source.validate_caption_candidates(subset, captions)
 
     if source is not dataset:
-        dataset.num_train_images = source.num_train_images
-        dataset.num_reg_images = source.num_reg_images
-        dataset.has_multiple_caption_candidates = source.has_multiple_caption_candidates
-        for subset, source_subset in zip(dataset.subsets, source.subsets):
-            subset.img_count = source_subset.img_count
+        dataset._sync_delegate_state()
 
 
 def _select_dataset_images(datasets, max_train_images: Optional[int], seed: int) -> None:
@@ -637,6 +623,10 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
         dataset = dataset_klass(subsets=subsets, **asdict(dataset_blueprint.params), **extra_dataset_params)
         val_datasets.append(dataset)
+
+    # drop images whose size cannot be read before selection and bucketing
+    for dataset in datasets + val_datasets:
+        dataset.drop_invalid_images()
 
     # apply max_train_images after all datasets/subsets are collected, before buckets and caching
     _select_dataset_images(

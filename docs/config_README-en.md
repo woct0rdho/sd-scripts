@@ -158,6 +158,8 @@ These are options related to the configuration of the data set. They cannot be d
     * Images whose original resolution (area) is equal to or smaller than the specified resolution will be skipped. Specify as `'size'` or `[width, height]`. This corresponds to the command-line argument `--skip_image_resolution`.
     * Useful when sharing the same image directory across multiple datasets with different resolutions, to exclude low-resolution source images from higher-resolution datasets.
 
+If the size of an image cannot be read (for example, when the file is corrupted), that image is skipped with a warning before bucket creation, and training continues with the remaining images. Images that fail to load during latent caching (for example, truncated files) are also skipped, and the buckets are rebuilt for the remaining images.
+
 These settings are fixed per dataset. That means that subsets belonging to the same dataset will share these settings. For example, if you want to prepare datasets with different resolutions, you can define them as separate datasets as shown in the example above, and set different resolutions for each.
 
 #### Options for Subsets
