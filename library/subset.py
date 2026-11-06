@@ -120,6 +120,7 @@ class DreamBoothSubset(BaseSubset):
         resize_interpolation: Optional[str] = None,
         enable_multiline_caption: bool = False,
         multiline_caption_separator: str = DEFAULT_MULTILINE_CAPTION_SEPARATOR,
+        recursive: bool = False,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -158,11 +159,12 @@ class DreamBoothSubset(BaseSubset):
         if self.caption_extension and not self.caption_extension.startswith("."):
             self.caption_extension = "." + self.caption_extension
         self.cache_info = cache_info
+        self.recursive = recursive
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, DreamBoothSubset):
             return NotImplemented
-        return self.image_dir == other.image_dir
+        return self.image_dir == other.image_dir and self.recursive == other.recursive
 
 
 class FineTuningSubset(BaseSubset):

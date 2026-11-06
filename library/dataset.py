@@ -1629,10 +1629,12 @@ def debug_dataset(train_dataset, show_input_ids=False):
 
 
 
-def glob_images(directory, base="*"):
+def glob_images(directory, base="*", recursive=False):
     img_paths = []
     for ext in IMAGE_EXTENSIONS:
-        if base == "*":
+        if recursive:
+            img_paths.extend(glob.glob(os.path.join(glob.escape(directory), "**", base + ext), recursive=True))
+        elif base == "*":
             img_paths.extend(glob.glob(os.path.join(glob.escape(directory), base + ext)))
         else:
             img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))

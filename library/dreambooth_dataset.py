@@ -156,7 +156,7 @@ class DreamBoothDataset(BaseDataset):
 
                 # we may need to check image size and existence of image files, but it takes time, so user should check it before training
             else:
-                img_paths = glob_images(subset.image_dir, "*")
+                img_paths = glob_images(subset.image_dir, "*", recursive=subset.recursive)
                 sizes: List[Optional[Tuple[int, int]]] = [None] * len(img_paths)
 
                 # new caching: get image size from cache files
@@ -165,7 +165,12 @@ class DreamBoothDataset(BaseDataset):
                     logger.info("get image size from name of cache files")
 
                     # make image path to npz path mapping
-                    npz_paths = glob.glob(os.path.join(subset.image_dir, "*" + strategy.cache_suffix))
+                    if subset.recursive:
+                        npz_paths = glob.glob(
+                            os.path.join(glob.escape(subset.image_dir), "**", "*" + strategy.cache_suffix), recursive=True
+                        )
+                    else:
+                        npz_paths = glob.glob(os.path.join(subset.image_dir, "*" + strategy.cache_suffix))
                     npz_paths.sort(
                         key=lambda item: item.rsplit("_", maxsplit=2)[0]
                     )  # sort by name excluding resolution and cache_suffix
@@ -234,7 +239,10 @@ class DreamBoothDataset(BaseDataset):
                         img_paths, sizes, self.is_training_dataset, self.validation_split, self.validation_seed
                     )
 
-            logger.info(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
+            logger.info(
+                f"found directory {subset.image_dir} contains {len(img_paths)} image files"
+                + (" (recursive)" if subset.recursive else "")
+            )
 
             if use_cached_info_for_subset:
                 captions = [metas[img_path]["caption"] for img_path in img_paths]

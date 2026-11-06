@@ -89,6 +89,7 @@ class DreamBoothSubsetParams(BaseSubsetParams):
     caption_extension: str = ".caption"
     cache_info: bool = False
     alpha_mask: bool = False
+    recursive: bool = False
 
 
 @dataclass
@@ -218,6 +219,7 @@ class ConfigSanitizer:
         "caption_extension": str,
         "class_tokens": str,
         "cache_info": bool,
+        "recursive": bool,
     }
     DB_SUBSET_DISTINCT_SCHEMA = {
         Required("image_dir"): str,
@@ -558,6 +560,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                 info += indent(dedent(f"""\
                   [Subset {j} of {dataset_type} {i}]
                     image_dir: "{subset.image_dir}"
+                    recursive: {subset.recursive if is_dreambooth else False}
                     image_count: {subset.img_count}
                     num_repeats: {subset.num_repeats}
                     shuffle_caption: {subset.shuffle_caption}
