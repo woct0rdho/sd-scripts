@@ -108,6 +108,32 @@ Below, the available options will be explained. For options with the same name a
 
 These are options that can be specified regardless of the learning method.
 
+#### Dataset group specific options
+
+These options apply to the whole dataset config (all `[[datasets]]` and `[[datasets.subsets]]`). They can only be specified in `[general]`.
+
+| Option Name | Example Setting | `[general]` | `[[datasets]]` | `[[datasets.subsets]]` |
+| ---- | ---- | ---- | ---- | ---- |
+| `max_train_images` | `1000` | o | - | - |
+| `max_train_images_seed` | `42` | o | - | - |
+
+* `max_train_images`
+    * If specified, after all datasets and subsets are loaded, randomly selects up to this many unique image files from the union of the training images and keeps only those. This happens before bucket creation, latent caching and text encoder output caching, so only the selected images are cached and trained.
+    * The selection is global: an image selected from an `image_dir` is kept in every dataset (resolution) where that same image appears. This is useful for multi-resolution/multiscale configs.
+    * The number counts unique image files, not `num_repeats` or the number of dataset entries. Regularization images are not sampled and are kept.
+    * If the number of available images is less than or equal to this value, all images are used.
+* `max_train_images_seed`
+    * Seed for the selection. The default is `42`. The same dataset contents and seed produce the same selection. Adding or removing images may change the selection.
+    * If `validation_split` is used, selection is applied to the union of the training and validation images, and each side keeps its split.
+
+Example:
+
+```toml
+[general]
+max_train_images = 1000
+max_train_images_seed = 42
+```
+
 #### Data set specific options
 
 These are options related to the configuration of the data set. They cannot be described in `datasets.subsets`.

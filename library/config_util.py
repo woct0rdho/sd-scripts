@@ -2,8 +2,10 @@ import argparse
 from dataclasses import (
     asdict,
     dataclass,
+    field,
 )
 import functools
+import os
 import random
 from textwrap import dedent, indent
 import json
@@ -160,8 +162,15 @@ class DatasetBlueprint:
 
 
 @dataclass
+class DatasetGroupParams:
+    max_train_images: Optional[int] = None
+    max_train_images_seed: int = 42
+
+
+@dataclass
 class DatasetGroupBlueprint:
     datasets: Sequence[DatasetBlueprint]
+    params: DatasetGroupParams = field(default_factory=DatasetGroupParams)
 
 
 @dataclass
@@ -239,6 +248,12 @@ class ConfigSanitizer:
     CN_SUBSET_DISTINCT_SCHEMA = {
         Required("image_dir"): str,
         Required("conditioning_data_dir"): str,
+    }
+
+    # options for the whole dataset group (all datasets/subsets), allowed in [general] only
+    DATASET_GROUP_SCHEMA = {
+        "max_train_images": Any(None, int),
+        "max_train_images_seed": int,
     }
 
     # datasets schema
@@ -362,6 +377,7 @@ class ConfigSanitizer:
             self.DB_SUBSET_ASCENDABLE_SCHEMA if support_dreambooth else {},
             self.CN_SUBSET_ASCENDABLE_SCHEMA if support_controlnet else {},
             self.DO_SUBSET_ASCENDABLE_SCHEMA if support_dropout else {},
+            self.DATASET_GROUP_SCHEMA,
         )
 
         self.user_config_validator = Schema(
@@ -459,7 +475,10 @@ class BlueprintGenerator:
             )
             dataset_blueprints.append(DatasetBlueprint(is_dreambooth, is_controlnet, params, subset_blueprints))
 
-        dataset_group_blueprint = DatasetGroupBlueprint(dataset_blueprints)
+        dataset_group_blueprint = DatasetGroupBlueprint(
+            dataset_blueprints,
+            self.generate_params_by_fallbacks(DatasetGroupParams, [general_config, argparse_config, runtime_params]),
+        )
 
         return Blueprint(dataset_group_blueprint)
 
@@ -482,6 +501,93 @@ class BlueprintGenerator:
                 return value
 
         return default_value
+
+
+def _normalize_image_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _get_dataset_image_source(dataset):
+    """ControlNetDataset delegates image bookkeeping to an internal DreamBoothDataset."""
+    return getattr(dataset, "dreambooth_dataset_delegate", dataset)
+
+
+def _filter_dataset_images(dataset, selected_image_paths: set[str]) -> None:
+    source = _get_dataset_image_source(dataset)
+
+    # regularization images are not part of the sampled pool, so keep all of them
+    keys_to_remove = [
+        image_key
+        for image_key, info in source.image_data.items()
+        if not info.is_reg and _normalize_image_path(info.absolute_path) not in selected_image_paths
+    ]
+    for image_key in keys_to_remove:
+        del source.image_data[image_key]
+        source.image_to_subset.pop(image_key, None)
+
+    # recompute the counts because they may include repeats and regularization images
+    source.num_train_images = sum(info.num_repeats for info in source.image_data.values() if not info.is_reg)
+    source.num_reg_images = sum(info.num_repeats for info in source.image_data.values() if info.is_reg)
+
+    for subset in source.subsets:
+        subset.img_count = 0
+    for subset in source.image_to_subset.values():
+        subset.img_count += 1
+
+    # unselected images may have been the only ones with multiple caption candidates
+    source.has_multiple_caption_candidates = False
+    for subset in source.subsets:
+        captions = [
+            info.caption
+            for image_key, info in source.image_data.items()
+            if source.image_to_subset[image_key] is subset
+        ]
+        source.validate_caption_candidates(subset, captions)
+
+    if source is not dataset:
+        dataset.num_train_images = source.num_train_images
+        dataset.num_reg_images = source.num_reg_images
+        dataset.has_multiple_caption_candidates = source.has_multiple_caption_candidates
+        for subset, source_subset in zip(dataset.subsets, source.subsets):
+            subset.img_count = source_subset.img_count
+
+
+def _select_dataset_images(datasets, max_train_images: Optional[int], seed: int) -> None:
+    """Randomly select unique training images across all datasets, deterministically for a given seed."""
+    if max_train_images is None:
+        return
+    if max_train_images <= 0:
+        logger.warning(
+            f"max_train_images must be greater than 0, ignoring: {max_train_images} / max_train_imagesは1以上で指定してください"
+        )
+        return
+
+    candidate_paths = set()
+    for dataset in datasets:
+        source = _get_dataset_image_source(dataset)
+        for info in source.image_data.values():
+            if not info.is_reg:
+                candidate_paths.add(_normalize_image_path(info.absolute_path))
+
+    if len(candidate_paths) <= max_train_images:
+        logger.info(
+            f"max_train_images={max_train_images} is not less than the number of unique training images "
+            f"({len(candidate_paths)}), all images are used"
+        )
+        return
+
+    candidate_paths = sorted(candidate_paths)  # sort for deterministic sampling independent of dataset order
+    rng = random.Random(seed)
+    selected_image_paths = set(rng.sample(candidate_paths, max_train_images))
+    logger.info(
+        f"randomly selected {max_train_images} of {len(candidate_paths)} unique training images with seed {seed} / "
+        f"{len(candidate_paths)}枚の画像から{max_train_images}枚をランダムに選択しました（seed: {seed}）"
+    )
+
+    for i, dataset in enumerate(datasets):
+        _filter_dataset_images(dataset, selected_image_paths)
+        logger.info(f"dataset {i}: {len(dataset.image_data)} images remain after max_train_images selection")
+
 
 def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlueprint) -> Tuple[DatasetGroup, Optional[DatasetGroup]]:
     datasets: List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
@@ -531,6 +637,13 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
         dataset = dataset_klass(subsets=subsets, **asdict(dataset_blueprint.params), **extra_dataset_params)
         val_datasets.append(dataset)
+
+    # apply max_train_images after all datasets/subsets are collected, before buckets and caching
+    _select_dataset_images(
+        datasets + val_datasets,
+        dataset_group_blueprint.params.max_train_images,
+        dataset_group_blueprint.params.max_train_images_seed,
+    )
 
     def print_info(_datasets, dataset_type: str):
         info = ""
