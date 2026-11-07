@@ -655,7 +655,8 @@ def add_masked_loss_arguments(parser: argparse.ArgumentParser):
 
 
 def add_gradient_checkpointing_skip_blocks_argument(parser: argparse.ArgumentParser):
-    """Partial gradient checkpointing for the models whose `enable_gradient_checkpointing` accepts `skip_blocks`."""
+    """Partial and adaptive gradient checkpointing for the models whose `enable_gradient_checkpointing` accepts `skip_blocks`."""
+    add_adaptive_checkpointing_arguments(parser)
     parser.add_argument(
         "--gradient_checkpointing_skip_blocks",
         type=int,
@@ -664,6 +665,70 @@ def add_gradient_checkpointing_skip_blocks_argument(parser: argparse.ArgumentPar
         " when --gradient_checkpointing is enabled. Each skipped block trades VRAM for speed. 0 (default) checkpoints all blocks."
         " / --gradient_checkpointing 有効時に、backward で再計算せず activation を保持する末尾の transformer ブロック数。"
         "スキップしたブロックの分だけ VRAM を使う代わりに速くなる。0（デフォルト）で全ブロックを checkpointing する",
+    )
+
+
+def add_adaptive_checkpointing_arguments(parser: argparse.ArgumentParser):
+    """Adaptive partial gradient checkpointing (see library/adaptive_checkpointing.py)."""
+    parser.add_argument(
+        "--adaptive_checkpointing",
+        action="store_true",
+        help="choose how many blocks keep their activations from the number of tokens in each batch, instead of a fixed"
+        " --gradient_checkpointing_skip_blocks: small buckets run without recomputation and only the large ones are"
+        " checkpointed, holding a chosen peak memory. Requires --gradient_checkpointing. Does not add compiled graphs"
+        " (torch.compile compiles the block body, outside the checkpointing wrapper)"
+        " / 各バッチのトークン数から、activation を保持するブロック数を自動で決める（固定の"
+        " --gradient_checkpointing_skip_blocks の代わり）。小さいバケットは再計算なしで回り、大きいバケットだけが"
+        " checkpointing されるので、ピークメモリを一定に保てる。--gradient_checkpointing が必要。コンパイル済みグラフは"
+        "増えない（torch.compile は checkpointing ラッパーの外側にあるブロック本体をコンパイルするため）",
+    )
+    parser.add_argument(
+        "--gpu_memory_reserved_gib",
+        type=float,
+        default=4.0,
+        help="memory to keep free when --adaptive_checkpointing measures the budget at the first step: the allocator's"
+        " reserved-minus-allocated slack, the text encoder if it is not resident yet, the VAE, and anything else that"
+        " shares the GPU (default: 4.0; with PYTORCH_ALLOC_CONF=expandable_segments:True, which shrinks the allocator's"
+        " slack several times over, 1.5 is enough)"
+        " / --adaptive_checkpointing が最初のステップで予算を測るときに空けておくメモリ。アロケータの reserved と"
+        "allocated の差、まだ常駐していない text encoder、VAE、その他 GPU を共有するもの（デフォルト: 4.0。"
+        "アロケータの差が小さくなる PYTORCH_ALLOC_CONF=expandable_segments:True を指定するなら 1.5 で十分）",
+    )
+    parser.add_argument(
+        "--adaptive_checkpointing_budget",
+        type=float,
+        default=None,
+        help="peak GPU memory the step may use, in GiB. Default: what is allocatable at the first step plus the resident"
+        " part, minus --gpu_memory_reserved_gib"
+        " / 1ステップが使ってよいピークGPUメモリ（GiB）。デフォルト: 最初のステップで確保可能な量に常駐部分を足し、"
+        "--gpu_memory_reserved_gib を引いた値",
+    )
+    parser.add_argument(
+        "--adaptive_checkpointing_fixed",
+        type=float,
+        default=None,
+        help="the token-independent part of the memory model, in GiB. Default: measured at the first step, i.e. the"
+        " weights, the LoRA parameters and their gradients, the optimizer state and its workspace"
+        " / メモリモデルのトークンに依存しない部分（GiB）。デフォルト: 最初のステップでの実測値（重み、LoRAとその勾配、"
+        "optimizer の状態とワークスペース）",
+    )
+    parser.add_argument(
+        "--adaptive_checkpointing_per_1k_tokens",
+        type=float,
+        default=None,
+        help="memory of a fully checkpointed step per 1024 tokens, in GiB. Default: the measured value of the"
+        " architecture, or one derived from its block geometry"
+        " / 全ブロック checkpointing 時の 1024 トークンあたりのメモリ（GiB）。デフォルト: そのアーキテクチャの実測値、"
+        "無ければブロックの構成から計算した値",
+    )
+    parser.add_argument(
+        "--adaptive_checkpointing_per_block_1k_tokens",
+        type=float,
+        default=None,
+        help="extra memory per uncheckpointed block per 1024 tokens, in GiB. Default: the measured value of the"
+        " architecture, or one derived from its block geometry"
+        " / activation を保持するブロック1個あたり、1024 トークンあたりの追加メモリ（GiB）。デフォルト: その"
+        "アーキテクチャの実測値、無ければブロックの構成から計算した値",
     )
 
 
@@ -677,6 +742,39 @@ def verify_gradient_checkpointing_skip_blocks(args: argparse.Namespace):
             " / --gradient_checkpointing が無効なため --gradient_checkpointing_skip_blocks は無視されます"
         )
         args.gradient_checkpointing_skip_blocks = 0
+
+    if getattr(args, "adaptive_checkpointing", False):
+        if not args.gradient_checkpointing:
+            raise ValueError(
+                "--adaptive_checkpointing requires --gradient_checkpointing (it only decides how many blocks are"
+                " checkpointed) / --adaptive_checkpointing には --gradient_checkpointing が必要です"
+                "（checkpointing するブロック数を決めるだけのため）"
+            )
+        if args.gradient_checkpointing_skip_blocks > 0:
+            logger.warning(
+                "--gradient_checkpointing_skip_blocks is ignored because --adaptive_checkpointing decides it per step"
+                " / --adaptive_checkpointing が毎ステップ決めるため --gradient_checkpointing_skip_blocks は無視されます"
+            )
+            args.gradient_checkpointing_skip_blocks = 0
+        if getattr(args, "torch_compile", False):
+            raise ValueError(
+                "--adaptive_checkpointing cannot be used with --torch_compile: that compiles the whole model, so the"
+                " checkpointing branch would be inside the compiled graph and every change would recompile."
+                " Use --compile (per-block) instead"
+                " / --adaptive_checkpointing は --torch_compile と併用できません（モデル全体をコンパイルするため、"
+                "checkpointing の分岐がグラフ内に入り、変更のたびに再コンパイルされる）。--compile（ブロック単位）を使う"
+            )
+        for name in (
+            "adaptive_checkpointing_per_1k_tokens",
+            "adaptive_checkpointing_per_block_1k_tokens",
+            "adaptive_checkpointing_fixed",
+            "adaptive_checkpointing_budget",
+        ):
+            value = getattr(args, name, None)
+            if value is not None and value < 0:
+                raise ValueError(f"--{name} must be 0 or positive, got {value}")
+        if getattr(args, "gpu_memory_reserved_gib", 0.0) < 0:
+            raise ValueError(f"--gpu_memory_reserved_gib must be 0 or positive, got {args.gpu_memory_reserved_gib}")
 
 
 def add_dit_training_arguments(parser: argparse.ArgumentParser):

@@ -219,6 +219,8 @@ For LoRA training, use `network_reg_lrs` in `--network_args` instead. See [Secti
   - Offload activations to CPU RAM using async non-blocking transfers (faster than `--cpu_offload_checkpointing`). Cannot be combined with `--cpu_offload_checkpointing` or `--blocks_to_swap`.
 * `--gradient_checkpointing_skip_blocks=<integer>`
   - Partial gradient checkpointing: the last N Transformer blocks keep their activations instead of recomputing them in the backward pass. Each skipped block uses more VRAM and saves the recomputation of one block, so the VRAM usage and the step time change linearly with N. `0` (default) checkpoints all blocks; the maximum is the number of blocks of the model (28 for Anima-Preview). Only effective with `--gradient_checkpointing` (ignored with a warning otherwise). Can be combined with `--blocks_to_swap`, `--cpu_offload_checkpointing`, `--unsloth_offload_checkpointing` and `--compile`. See [Section 7.1](#71-vram-usage-optimization--vram使用量の最適化).
+* `--adaptive_checkpointing`
+  - Choose `--gradient_checkpointing_skip_blocks` per batch from the number of tokens instead of fixing it: small buckets run with no recomputation and only the large ones are checkpointed, so the peak memory stays within a budget. Requires `--gradient_checkpointing`; it replaces `--gradient_checkpointing_skip_blocks` (a warning says so). The memory model is measured for Anima (ConvRot INT8 DiT, rank-64 LoRA) and needs no numbers from the user. See [Section 7.1](#71-vram-usage-optimization--vram使用量の最適化).
 * `--cache_text_encoder_outputs`
   - Cache Qwen3 text encoder outputs to reduce VRAM usage. Recommended when not training text encoder LoRA.
 * `--cache_text_encoder_outputs_to_disk`
@@ -288,6 +290,7 @@ LoRA学習の場合は、`--network_args`の`network_reg_lrs`を使用してく�
   - `--block_swap_h2d_only`でLoRA学習向けの高速なH2D-onlyブロックスワップを有効にできます（`--gradient_checkpointing`が必須）。[ブロックスワップ](./block_swap.md)を参照してください。
 * `--unsloth_offload_checkpointing` - 非同期転送でアクティベーションをCPU RAMにオフロード。`--cpu_offload_checkpointing`および`--blocks_to_swap`とは併用できません。
 * `--gradient_checkpointing_skip_blocks` - 部分的なgradient checkpointing。末尾のN個のTransformerブロックはbackwardで再計算せずactivationを保持します。スキップしたブロック1個につきVRAMが増え、1ブロック分の再計算が省けるため、VRAM使用量とステップ時間はNに対して線形に変化します。`0`（デフォルト）で全ブロックをcheckpointing、最大値はモデルのブロック数（Anima-Previewは28）です。`--gradient_checkpointing`指定時のみ有効です（未指定時は警告を出して無視します）。`--blocks_to_swap`、`--cpu_offload_checkpointing`、`--unsloth_offload_checkpointing`、`--compile`と併用できます。[7.1節](#71-vram-usage-optimization--vram使用量の最適化)も参照してください。
+* `--adaptive_checkpointing` - `--gradient_checkpointing_skip_blocks` をバッチのトークン数から毎回決めます。小さいバケットは再計算なしで回り、大きいバケットだけがcheckpointingされるため、ピークメモリを予算内に保てます。`--gradient_checkpointing` が必要で、`--gradient_checkpointing_skip_blocks` の代わりになります（指定時は警告が出ます）。メモリモデルはAnima向けに実測済み（ConvRot INT8 DiT、rank-64 LoRA）で、数値を指定する必要はありません。[7.1節](#71-vram-usage-optimization--vram使用量の最適化)も参照してください。
 * `--cache_text_encoder_outputs` - Qwen3の出力をキャッシュしてメモリ使用量を削減。
 * `--cache_latents`, `--cache_latents_to_disk` - Qwen-Image VAEの出力をキャッシュ。
 * `--vae_chunk_size` - Qwen-Image VAEのチャンク処理サイズ。メモリ使用量を削減しますが速度が低下します。デフォルトはチャンク処理なし。
@@ -470,7 +473,49 @@ Anima models can be large, so GPUs with limited VRAM may require optimization:
   | Peak VRAM | 6.5GB | 9.4GB | 12.9GB | 16.4GB | 19.9GB |
   | Step time | 0.85s | 0.75s | 0.73s | 0.59s | 0.53s |
 
-  Each skipped block costs about 0.48GB at this resolution and saves about 3.5% of the step time. Larger batch sizes give little throughput gain with this model size, so skipping blocks is usually the better use of spare VRAM than increasing the batch size. The VRAM cost per block does not depend on the GPU: on an RTX 4090 (24GB, same settings) the peaks are 6.7GB / 9.6GB / 13.0GB / 16.5GB / 20.0GB and the step times 0.73s / 0.68s / 0.63s / 0.56s / 0.52s for `0` / `7` / `14` / `21` / `28`, so all blocks can be skipped on a 24GB GPU for a 30% faster step.
+  Each skipped block costs about 0.48GB at this resolution and saves about 3.5% of the step time (bf16 DiT, LoRA dim 16, the configuration of this table; the `--adaptive_checkpointing` numbers below are for the ConvRot INT8 DiT with a rank-64 LoRA). Larger batch sizes give little throughput gain with this model size, so skipping blocks is usually the better use of spare VRAM than increasing the batch size. The VRAM cost per block does not depend on the GPU: on an RTX 4090 (24GB, same settings) the peaks are 6.7GB / 9.6GB / 13.0GB / 16.5GB / 20.0GB and the step times 0.73s / 0.68s / 0.63s / 0.56s / 0.52s for `0` / `7` / `14` / `21` / `28`, so all blocks can be skipped on a 24GB GPU for a 30% faster step.
+
+- **`--adaptive_checkpointing`**: picks N per batch from the token count, so a bucketed dataset pays the recomputation
+  only for the buckets that need it:
+
+  ```
+  peak = fixed + tokens / 1024 * (per_1k_tokens + N * per_block_1k_tokens)
+  N = clamp((budget - fixed - tokens / 1024 * per_1k_tokens) / (tokens / 1024 * per_block_1k_tokens), 0, blocks)
+  ```
+
+  `fixed` is measured at the first step (`torch.cuda.memory_allocated()`: weights, LoRA and its gradients, optimizer
+  state and workspace; 4.4 GiB for this DiT with a rank-64 LoRA). The two coefficients are the activations and follow
+  from the block geometry - `num_blocks * 4 * dim` bytes per token for the blocks that are checkpointed, and
+  `11 * dim + 7 * ffn` per token for a block that is not - so Anima's are `per_1k_tokens = 0.243`,
+  `per_block_1k_tokens = 0.078` GiB, and they are the same on CUDA and on ROCm. Measured with `--compile` on an
+  RTX 3080 Ti Laptop (sm86) and a Radeon 8060S (gfx1151), which agree within 0.3 GiB:
+
+  | tokens | bucket | peak allocated, all checkpointed | 7 blocks skipped |
+  |---|---|---|---|
+  | 2304 | 768x768 | 5.0 GiB | 6.1 |
+  | 4096 | 1024x1024 | 5.4 | 7.5 |
+  | 7744 | 1408x1408 | 6.3 | 10.3 |
+  | 12544 | 1792x1792 | 7.4 | 13.9 |
+  | 16384 | 2048x2048 | 8.4 | 17.0 |
+
+  So **2048x2048 (16384 tokens) fits in 16 GiB with every block checkpointed**: 8.4 GiB for the step, 1.2 GiB for the
+  Qwen3 encoder when its outputs are not cached, and ~1.4 GiB of driver and desktop.
+
+  The **budget** is what is allocatable at the first step plus the resident part minus `--gpu_memory_reserved_gib`, i.e.
+  a cap on the step's peak allocation; nothing is hard-coded to a card, so the same config moves from a 16 GiB laptop to
+  a 124 GiB APU without touching the coefficients. `--adaptive_checkpointing_budget` sets the cap explicitly. The reserve
+  covers what the model does not: the caching allocator's reserved-minus-allocated slack and anything else that starts
+  using the GPU later. **Set `PYTORCH_ALLOC_CONF=expandable_segments:True`**: it takes that slack from 0.6-0.8 GiB to
+  0.1-0.2 GiB on CUDA (1.0 to 0.6 GiB for Anima and 7.1 to 1.1 GiB for MOSS-Image on ROCm), which is what makes **1.5 GiB
+  of reserve** enough; without it keep the default 4 GiB. `--adaptive_checkpointing` warns about this at startup.
+  (The legacy `PYTORCH_CUDA_ALLOC_CONF` / `PYTORCH_HIP_ALLOC_CONF` names still work, but torch parses them first, so a
+  setting there overrides `PYTORCH_ALLOC_CONF`.)
+  `--adaptive_checkpointing_fixed`, `..._per_1k_tokens` and `..._per_block_1k_tokens` override the three terms (e.g. for
+  a different optimizer or a much larger LoRA rank); the trainer raises a clear error when it can neither measure the
+  resident part nor derive the coefficients.
+- **Compile time is unaffected.** `--adaptive_checkpointing` compiles nothing extra: `torch.compile` compiles each
+  block's body (`_forward`), outside the checkpointing wrapper, so changing the count between steps neither invalidates
+  nor adds a compiled graph. `--torch_compile`, which compiles the whole model, is rejected for that reason.
 
 - **`--cache_text_encoder_outputs`**: Caches Qwen3 outputs so the text encoder can be freed from VRAM during training.
 
@@ -493,6 +538,29 @@ Animaモデルは大きい場合があるため、VRAMが限られたGPUでは�
 - `--unsloth_offload_checkpointing`: 非同期転送でアクティベーションをCPUにオフロード
 - `--gradient_checkpointing`: 標準的な勾配チェックポイント
 - `--gradient_checkpointing_skip_blocks`: 部分的なgradient checkpointing。末尾のN個のブロックはbackwardで再計算せずactivationを保持するため、余っているVRAMを速度に変換できます。VRAM使用量とステップ時間はNに対して線形に変化するので、学習が収まる範囲でNを増やしてください。Anima（28ブロック）、約1MPの画像、batch size 1、LoRA dim 16、bf16、`--attn_mode flash`、latentとText Encoder出力をキャッシュした場合の実測（RTX PRO 6000 Blackwell、`nvidia-smi`の学習中ピーク）は、`0`で6.5GB / 0.85秒、`7`で9.4GB / 0.75秒、`14`で12.9GB / 0.73秒、`21`で16.4GB / 0.59秒、`28`（再計算なし）で19.9GB / 0.53秒でした。1ブロックあたり約0.48GBでステップ時間が約3.5%短縮されます。このモデルサイズではbatch sizeを増やしてもスループットはほとんど向上しないため、余ったVRAMはbatch sizeよりもブロックのスキップに使う方が有利です。1ブロックあたりのVRAMはGPUによらず、RTX 4090（24GB、同じ設定）では`0` / `7` / `14` / `21` / `28`でピークが6.7GB / 9.6GB / 13.0GB / 16.5GB / 20.0GB、ステップ時間が0.73秒 / 0.68秒 / 0.63秒 / 0.56秒 / 0.52秒でした。24GBのGPUなら全ブロックをスキップでき、ステップ時間が30%短縮されます
+- `--adaptive_checkpointing`: バッチのトークン数からNを毎回決めるので、バケット化されたデータセットでも必要なバケットだけが再計算のコストを払います:
+
+  ```
+  peak = fixed + tokens / 1024 * (per_1k_tokens + N * per_block_1k_tokens)
+  N = clamp((budget - fixed - tokens / 1024 * per_1k_tokens) / (tokens / 1024 * per_block_1k_tokens), 0, blocks)
+  ```
+
+  `fixed` は最初のステップで実測されます（`torch.cuda.memory_allocated()`: 重み、LoRAとその勾配、optimizerの状態とワークスペース。このDiTとrank-64 LoRAで4.4 GiB）。係数はactivationで、ブロックの構成から決まります（checkpointingするブロックは1トークンあたり `num_blocks * 4 * dim` バイト、しないブロックは1トークンあたり `11 * dim + 7 * ffn` バイト）。Animaでは `per_1k_tokens = 0.243`、`per_block_1k_tokens = 0.078` GiBで、CUDAとROCmで同じ値です。RTX 3080 Ti Laptop（sm86）とRadeon 8060S（gfx1151）で `--compile` 有効時に実測し、両者の差は0.3 GiB以内でした:
+
+  | トークン数 | バケット | 全ブロックcheckpointing | 7個スキップ |
+  |---|---|---|---|
+  | 2304 | 768x768 | 5.0 GiB | 6.1 |
+  | 4096 | 1024x1024 | 5.4 | 7.5 |
+  | 7744 | 1408x1408 | 6.3 | 10.3 |
+  | 12544 | 1792x1792 | 7.4 | 13.9 |
+  | 16384 | 2048x2048 | 8.4 | 17.0 |
+
+  したがって**2048x2048（16384トークン）は全ブロックをcheckpointingすれば16 GiBに収まります**: ステップが8.4 GiB、Text Encoder出力をキャッシュしない場合はQwen3エンコーダーが1.2 GiB、ドライバとデスクトップが約1.4 GiBです。
+
+  **予算**は、最初のステップで確保可能な量に常駐部分を足し、`--gpu_memory_reserved_gib` を引いた値、つまりステップのピークallocationの上限です。カード固有の値はないため、同じ設定が16 GiBのノートPCから124 GiBのAPUまでそのまま動きます。`--adaptive_checkpointing_budget` で明示もできます。予約分は、モデルが扱わない部分（アロケータのreservedとallocatedの差、および後からGPUを使い始めるもの）を受け持ちます。**`PYTORCH_ALLOC_CONF=expandable_segments:True` を指定してください**。この差がCUDAで0.6〜0.8 GiBから0.1〜0.2 GiBに（ROCmではAnimaが1.0から0.6 GiB、MOSS-Imageが7.1から1.1 GiBに）なり、**1.5 GiBの予約で十分**になります。指定しない場合はデフォルトの4 GiBのままにしてください。`--adaptive_checkpointing` は起動時にこれを警告します（旧名の `PYTORCH_CUDA_ALLOC_CONF` / `PYTORCH_HIP_ALLOC_CONF` も使えますが、torch はそちらを先に読むため、設定すると `PYTORCH_ALLOC_CONF` より優先されます）。
+  `--adaptive_checkpointing_fixed`、`..._per_1k_tokens`、`..._per_block_1k_tokens` で3つの項を上書きできます（別のoptimizerや極端に大きいLoRA rankなど）。常駐部分を測れず係数も導けない場合は、 Trainerが明示的なエラーを出します。
+- **コンパイル時間は変わりません。** `--adaptive_checkpointing` は追加のコンパイルをしません: `torch.compile` は各ブロックの本体（`_forward`）をcheckpointingラッパーの外側でコンパイルするため、ステップ間で数を変えてもグラフは無効化も追加もされません。モデル全体をコンパイルする `--torch_compile` はその理由で拒否されます。
+
 - `--cache_text_encoder_outputs`: Qwen3の出力をキャッシュ
 - `--cache_latents`: Qwen-Image VAEの出力をキャッシュ
 - `--convrot_int8`: ベース重みをロード時にConvRot INT8へ量子化（計測では1024x1024・`--compile`でピークVRAMが約15.6→14.0GiB）。forwardは高速化しますが、デフォルトの`bf16` backwardは重みを一時的に逆量子化するため、現状はステップ全体では遅くなります。ComfyUIの`*_int8_convrot`ファイルは自動判別されます。

@@ -10,8 +10,11 @@ from multiprocessing import Value
 from typing import Optional
 
 # bucket 切替で発生しうる稀な断片化 OOM 対策
-# torch import より前に環境変数を設定する必要があるため、ここで setdefault しておく.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# torch import より前に環境変数を設定する必要があるため、ここで設定しておく.
+# PYTORCH_ALLOC_CONF is the current name; the legacy CUDA/HIP names still work but take precedence over it, so any of
+# them being set means the user already chose an allocator configuration.
+if not any(os.environ.get(name) for name in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")):
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import toml
 import numpy as np

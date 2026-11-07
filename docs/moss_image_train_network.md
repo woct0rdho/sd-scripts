@@ -232,6 +232,8 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
   - `--block_swap_h2d_only` enables the faster H2D-only block swap for LoRA training (requires `--gradient_checkpointing`). See [Block Swap](./block_swap.md).
 * `--unsloth_offload_checkpointing`
   - Offload activations to CPU RAM using async non-blocking transfers (faster than `--cpu_offload_checkpointing`). Enables `--gradient_checkpointing`. Cannot be combined with `--cpu_offload_checkpointing` or `--blocks_to_swap`.
+* `--adaptive_checkpointing`
+  - Choose `--gradient_checkpointing_skip_blocks` per batch from the number of tokens instead of fixing it: small buckets run with no recomputation and only the large ones are checkpointed, so the peak memory stays within a budget. Requires `--gradient_checkpointing`; it replaces `--gradient_checkpointing_skip_blocks` (a warning says so). The memory model is measured for MOSS-Image (ConvRot INT8 DiT, rank-64 LoRA) and needs no numbers from the user. See [Section 5.4](#54-vram-usage-optimization--vram使用量の最適化).
 * `--gradient_checkpointing_skip_blocks=<integer>`
   - Partial gradient checkpointing: the last N of the 42 DiT blocks keep their activations instead of recomputing them in the backward pass. Each skipped block uses more VRAM and saves the recomputation of one block, so the VRAM usage and the step time change linearly with N. `0` (default) checkpoints all blocks, `42` checkpoints none of them. Only effective with `--gradient_checkpointing` (ignored with a warning otherwise). Can be combined with `--blocks_to_swap`, `--cpu_offload_checkpointing`, `--unsloth_offload_checkpointing` and `--compile`. See [Section 7.1](#71-vram-usage-optimization--vram-使用量の最適化) for measurements.
 * `--cache_text_encoder_outputs`, `--cache_text_encoder_outputs_to_disk`
@@ -286,6 +288,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--blocks_to_swap` - DiT のブロックを CPU と GPU でスワップして VRAM を節約。最大 **40**（42 ブロック − 2）。`--cpu_offload_checkpointing` および `--unsloth_offload_checkpointing` とは併用できません。
   - `--block_swap_h2d_only`でLoRA学習向けの高速なH2D-onlyブロックスワップを有効にできます（`--gradient_checkpointing`が必須）。[ブロックスワップ](./block_swap.md)を参照してください。
 * `--unsloth_offload_checkpointing` - 非同期転送でアクティベーションを CPU RAM にオフロード。`--gradient_checkpointing` を有効にします。`--cpu_offload_checkpointing` および `--blocks_to_swap` とは併用できません。
+* `--adaptive_checkpointing` - `--gradient_checkpointing_skip_blocks` をバッチのトークン数から毎回決めます。小さいバケットは再計算なしで回り、大きいバケットだけがcheckpointingされるため、ピークメモリを予算内に保てます。`--gradient_checkpointing` が必要で、`--gradient_checkpointing_skip_blocks` の代わりになります（指定時は警告が出ます）。メモリモデルはMOSS-Image向けに実測済み（ConvRot INT8 DiT、rank-64 LoRA）で、数値を指定する必要はありません。
 * `--gradient_checkpointing_skip_blocks` - 部分的な gradient checkpointing。42 個の DiT ブロックのうち末尾の N 個は backward で再計算せず activation を保持します。スキップしたブロック 1 個につき VRAM が増え、1 ブロック分の再計算が省けるため、VRAM 使用量とステップ時間は N に対して線形に変化します。`0`（デフォルト）で全ブロックを checkpointing、`42` で全ブロックをスキップします。`--gradient_checkpointing` 指定時のみ有効です（未指定時は警告を出して無視します）。`--blocks_to_swap`、`--cpu_offload_checkpointing`、`--unsloth_offload_checkpointing`、`--compile` と併用できます。実測値は [7.1 節](#71-vram-usage-optimization--vram-使用量の最適化) を参照。
 * `--cache_text_encoder_outputs`, `--cache_text_encoder_outputs_to_disk` - Qwen3.5-9B の出力をキャッシュします。テキストエンコーダーの LoRA を学習しない場合は強く推奨します（キャッシュ後にテキストエンコーダーは GPU から解放されます）。キャッシュファイルは `<image>_moss_te.npz` で、unconditional の埋め込みも保存されるため `caption_dropout_rate` を使用できます。`--network_train_unet_only` が必要です。画像の全キャプション候補の出力を一つのファイルに保存します（`num_candidates`、候補 `k` ごとの `prompt_embeds_{k}` / `attn_mask_{k}` / `caption_{k}`）。処理済みのキャプション文字列（`caption_prefix` / `caption_suffix` 適用後）も保存され、候補数や文字列が現在のキャプションと異なる場合は、`--skip_cache_check` を指定していなければ再キャッシュされます。バージョン 0.12.1 で作成したファイル（`num_candidates` なし）は、候補が一つの画像ではそのまま使えます。
 * `--text_encoder_batch_size` - テキストエンコーダー出力のキャッシュ時に 1 回に処理するキャプション数。テキストエンコーダー自体は常に 1 件ずつ（パディングなし）実行されるため、ループの粒度のみに影響します。
@@ -517,6 +520,58 @@ Measured on an RTX PRO 6000 Blackwell with about 1MP images (`resolution = 1024`
 * Guidelines at this resolution with the bf16 DiT: about `10` on a 24GB GPU, `18` on 32GB, `34` on 48GB. With ConvRot INT8 and `--compile`: about `22` on 24GB, `36` on 32GB, all `42` on 48GB. Leave 1GB to 2GB of headroom for larger buckets and sample generation.
 * The VRAM cost per block does not depend on the GPU, only the time does. On an RTX 4090 (24GB, same settings, ConvRot INT8 text encoder): bf16 DiT 14.3GB / 1.88s with `0`, 17.6GB / 1.83s with `5`, 22.5GB / 1.77s with `10` (about 0.8GB and 11.5 ms per block); ConvRot INT8 + `--compile` 10.0GB / 1.00s with `0`, 13.0GB / 0.98s with `7`, 17.5GB / 0.94s with `14`, 22.0GB / 0.90s with `21` (about 0.6GB and 4.8 ms per block). On the RTX 4090, ConvRot INT8 + `--compile` is 1.9 times faster than bf16 (probably because the bf16 tensor core throughput of the GeForce GPUs is limited while int8 is not), so on 24GB GPUs use it first and then spend the remaining VRAM on `--gradient_checkpointing_skip_blocks`.
 
+#### Adaptive checkpointing / 適応的 gradient checkpointing
+
+A fixed `--gradient_checkpointing_skip_blocks` has to satisfy the *largest* bucket of the dataset, so every small batch
+pays recomputation it does not need. `--adaptive_checkpointing` picks the number per batch instead, from the token count:
+
+  ```
+  peak = fixed + tokens / 1024 * (per_1k_tokens + N * per_block_1k_tokens)
+  N = clamp((budget - fixed - tokens / 1024 * per_1k_tokens) / (tokens / 1024 * per_block_1k_tokens), 0, 42)
+  ```
+
+* `fixed` is measured at the first step (`torch.cuda.memory_allocated()`: weights, LoRA and its gradients, optimizer
+  state and workspace; 6.2 GiB on ROCm and 8.1 GiB on the CUDA machine for this DiT with a rank-64 LoRA, the difference
+  being the optimizer build rather than the GPU - the flat step keeps extra buffers). The two coefficients are the
+  activations and follow from the block geometry:
+  `num_blocks * 4 * dim` bytes per token for the blocks that are checkpointed, `11 * dim + 7 * ffn` per token per block
+  that is not. For MOSS-Image they are `per_1k_tokens = 0.428` and `per_block_1k_tokens = 0.105` GiB, the same on CUDA
+  and ROCm. Measured with `--compile` on a Radeon 8060S (gfx1151, feather attention) and on an RTX 3080 Ti Laptop (sm86,
+  flash attention), which agree within 0.1 GiB:
+
+  | tokens | bucket | peak allocated, all checkpointed | 7 blocks skipped |
+  |---|---|---|---|
+  | 4096 | 1024x1024 | 7.9 GiB | 10.8 |
+  | 16384 | 2048x2048 | 12.9 | 24.4 |
+
+* The **budget** is what is allocatable at the first step plus the resident part minus `--gpu_memory_reserved_gib` (default
+  `4.0`), i.e. a cap on the step's peak allocation. Nothing is hard-coded to a card: the free memory carries the card's
+  size and whatever else is on it (DiT, LoRA, text encoder, VAE, optimizer, other processes), so the same config moves
+  from a 124 GiB unified-memory APU to a 32 GiB dGPU without touching the coefficients. `--adaptive_checkpointing_budget`
+  sets the whole number explicitly.
+* The reserve covers what the model does not: the caching allocator's reserved-minus-allocated slack and anything else
+  that starts using the GPU later. **Set `PYTORCH_ALLOC_CONF=expandable_segments:True`**: at 1024x1024 it takes that
+  slack from 7.1 GiB to 1.1 GiB here (1.0 to 0.6 GiB for Anima, 0.6-0.8 to 0.1-0.2 GiB on CUDA), which is what makes
+  **1.5 GiB of reserve** enough; without it keep the default 4 GiB. `--adaptive_checkpointing` warns about this at
+  startup. (The legacy `PYTORCH_CUDA_ALLOC_CONF` / `PYTORCH_HIP_ALLOC_CONF` names still work, but torch parses them
+  first, so a setting there overrides `PYTORCH_ALLOC_CONF`.)
+* If a bucket cannot fit even with **every** block checkpointed, the count stays at 0 and a warning says so once (lower
+  the reserve, train a smaller resolution, or use `--unsloth_offload_checkpointing`); the batch would otherwise run out
+  of memory.
+* `--adaptive_checkpointing_fixed`, `..._per_1k_tokens` and `..._per_block_1k_tokens` override the three terms (e.g. for
+  a different optimizer or a much larger LoRA rank); the trainer raises a clear error when it can neither measure the
+  resident part nor derive the coefficients.
+* **Compile time is unaffected.** `torch.compile` compiles each block's body (`_forward`), outside the checkpointing
+  wrapper, so changing the count between steps neither invalidates nor adds a compiled graph (this is covered by a test).
+  `--torch_compile`, which compiles the whole model, is rejected for the same reason.
+* Tokens are counted as image tokens (VAE latents / patch size 2) plus text tokens (the token ids of the batch, or the
+  cached embeddings' length), so the text part of the sequence is included.
+
+For the same 2048x2048 bucket, a fixed configuration costs either 12.9 GiB with every block checkpointed (measured: 43 s
+per step) or ~84 GiB with none. The adaptive choice keeps the peak at the budget and pays the recomputation only for the
+buckets that need it; on this dataset 12.8% of the entries are above the ~14k-token point where checkpointing starts, so
+the averaged cost is about 1%.
+
 #### Measured Memory Usage / メモリ使用量の実測値
 
 Peak GPU memory as reported by the driver (`nvidia-smi`, includes the CUDA context) and peak CPU RAM (working set of the process) measured on Windows with an RTX PRO 6000 Blackwell, 1024x1024 images, batch size 1, LoRA dim 16, AdamW, `--gradient_checkpointing`, latents cached to disk. "Startup" includes moving the text encoder to the GPU for caching (this happens even when all outputs are already cached on disk); "Training" is the peak after the training loop started.
@@ -594,6 +649,12 @@ RTX PRO 6000 Blackwell、約 1MP の画像（`resolution = 1024` でバケット
 * `--compile` ではコンパイルされたブロックが保持する中間テンソルが減るため、1 ブロックあたり約 0.6GB で済み、同じ VRAM で約 1.6 倍のブロックをスキップできます。1 ブロックあたりの短縮は約 4.8 ms（約 0.6%）です。
 * この解像度での目安は、bf16 DiT で 24GB GPU なら `10` 前後、32GB で `18`、48GB で `34`。ConvRot INT8 と `--compile` なら 24GB で `22` 前後、32GB で `36`、48GB で全 `42` です。大きめのバケットやサンプル生成のために 1〜2GB の余裕を残してください。
 * 1 ブロックあたりの VRAM は GPU によらず、時間だけが変わります。RTX 4090（24GB、同じ設定、テキストエンコーダーは ConvRot INT8）では、bf16 DiT で `0` が 14.3GB / 1.88 秒、`5` が 17.6GB / 1.83 秒、`10` が 22.5GB / 1.77 秒（1 ブロックあたり約 0.8GB・11.5 ms）、ConvRot INT8 + `--compile` で `0` が 10.0GB / 1.00 秒、`7` が 13.0GB / 0.98 秒、`14` が 17.5GB / 0.94 秒、`21` が 22.0GB / 0.90 秒（約 0.6GB・4.8 ms）でした。RTX 4090 では ConvRot INT8 + `--compile` が bf16 の 1.9 倍速い（GeForce は bf16 の Tensor Core 性能が制限されており、int8 は制限されていないためと思われます）ので、24GB の GPU ではまずこちらを使い、残った VRAM を `--gradient_checkpointing_skip_blocks` に充ててください。
+
+#### 適応的 gradient checkpointing / Adaptive checkpointing
+
+固定の `--gradient_checkpointing_skip_blocks` はデータセットの最大バケットに合わせる必要があるため、小さいバッチでも不要な再計算を払います。`--adaptive_checkpointing` はトークン数からバッチごとにブロック数を決めます（式は英語版を参照）。`fixed` は最初のステップで実測され（重み、LoRAとその勾配、optimizerの状態とワークスペース。このDiTとrank-64 LoRAでROCm 6.2 GiB、CUDA 8.1 GiB）、係数はブロックの構成から決まるactivation（MOSS-Imageでは `per_1k_tokens = 0.428`、`per_block_1k_tokens = 0.105` GiB）で、CUDAとROCmで同じ値です。実測値は英語版の表を参照してください。
+
+予算は「最初のステップで確保可能な量＋常駐部分－`--gpu_memory_reserved_gib`」、つまりステップのピークallocationの上限です。カードの容量や同居しているものは空きメモリ側に反映されるため、124 GiBのAPUから32 GiBのdGPUへ移っても係数を変える必要はありません。予約分は、アロケータのreservedとallocatedの差など、モデルが扱わない部分を受け持ちます。**`PYTORCH_ALLOC_CONF=expandable_segments:True` を指定してください**: この差が1024x1024でROCmでは7.1 GiBから1.1 GiBになり（Animaは1.0から0.6 GiB、CUDAは0.6〜0.8から0.1〜0.2 GiB）、**1.5 GiBの予約で十分**になります。指定しない場合はデフォルトの4 GiBのままにしてください。`--adaptive_checkpointing` は起動時にこれを警告します（旧名の `PYTORCH_CUDA_ALLOC_CONF` / `PYTORCH_HIP_ALLOC_CONF` も使えますが、torch はそちらを先に読むため、設定すると `PYTORCH_ALLOC_CONF` より優先されます）。`--adaptive_checkpointing_fixed`、`..._per_1k_tokens`、`..._per_block_1k_tokens` で3つの項を上書きできます。
 
 #### メモリ使用量の実測値
 
