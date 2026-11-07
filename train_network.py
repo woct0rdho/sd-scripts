@@ -38,6 +38,7 @@ from library.dreambooth_dataset import DreamBoothDataset
 from library.model_io import SS_METADATA_MINIMUM_KEYS
 import library.logging_util as logging_util
 import library.loss as loss_util
+import library.adaptive_checkpointing as adaptive_checkpointing
 import library.checkpoint_io as checkpoint_io
 import library.feather_conv as feather_conv
 import library.resumable_dataloader as resumable_dataloader
@@ -70,6 +71,7 @@ class NetworkTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
         self.is_sdxl = False
+        self._adaptive_checkpointing = None  # built on the first step, see on_step_start
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -445,7 +447,62 @@ class NetworkTrainer:
         return accelerator.prepare(unet)
 
     def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train: bool = True):
-        pass
+        """Per-batch hook; the base implementation drives --adaptive_checkpointing.
+
+        The number of uncheckpointed blocks is a pure Python flag read by `Block.forward`, and torch.compile compiles the
+        block body (`_forward`) outside that wrapper, so changing it here does not add compiled graphs.
+        """
+        if not is_train or not getattr(args, "adaptive_checkpointing", False):
+            return
+        if self._adaptive_checkpointing is None:
+            self._adaptive_checkpointing = self._build_adaptive_checkpointing(args, accelerator, unet)
+            if self._adaptive_checkpointing is None:
+                return
+        tokens = self.get_checkpointing_token_count(args, accelerator, unet, batch)
+        self._adaptive_checkpointing.update(tokens)
+
+    def _build_adaptive_checkpointing(self, args, accelerator, unet):
+        """The controller for --adaptive_checkpointing, or None when the model cannot do partial checkpointing."""
+        model = accelerator.unwrap_model(unet)
+        if not hasattr(model, "enable_gradient_checkpointing"):
+            logger.warning(
+                f"--adaptive_checkpointing is ignored: {type(model).__name__} has no enable_gradient_checkpointing()"
+                " / --adaptive_checkpointing は無視されます: このモデルは enable_gradient_checkpointing() を持ちません"
+            )
+            return None
+
+        cpu_offload = bool(getattr(args, "cpu_offload_checkpointing", False))
+        unsloth_offload = bool(getattr(self, "_use_unsloth_offload_checkpointing", False))
+
+        def apply(skip_blocks: int) -> None:
+            model.enable_gradient_checkpointing(cpu_offload=cpu_offload, unsloth_offload=unsloth_offload, skip_blocks=skip_blocks)
+
+        return adaptive_checkpointing.AdaptiveCheckpointing.from_args(args, model, apply)
+
+    def get_checkpointing_patch_size(self, args, unet) -> int:
+        """How many latent pixels one DiT token covers on a side (the patch size of the model)."""
+        return 2
+
+    def get_checkpointing_token_count(self, args, accelerator, unet, batch) -> Optional[int]:
+        """Sequence length of this batch (image tokens + text tokens), or None when it cannot be determined.
+
+        The image part comes from the cached latents (VAE latent size / patch size); the text part from the token ids of
+        the batch when the text encoder runs per step, or from the cached embeddings when they are cached. The text part
+        is a few percent of the total, but it is part of the attention sequence, so it is counted.
+        """
+        latents = batch.get("latents")
+        if not torch.is_tensor(latents):
+            return None
+        tokens = adaptive_checkpointing.token_count(latents, self.get_checkpointing_patch_size(args, unet))
+
+        ids = batch.get("input_ids_list")
+        if isinstance(ids, (list, tuple)) and len(ids) > 0:
+            tokens += sum(int(t.numel()) for t in ids if torch.is_tensor(t))
+        else:
+            cached = batch.get("text_encoder_outputs_list")
+            if isinstance(cached, (list, tuple)) and len(cached) > 0 and torch.is_tensor(cached[0]):
+                tokens += int(cached[0].shape[0]) * int(cached[0].shape[1])
+        return tokens
 
     def on_validation_step_end(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype):
         pass
