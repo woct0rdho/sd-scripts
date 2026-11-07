@@ -342,8 +342,9 @@ def test_latents_caching_roundtrip(tmp_path):
         image = Image.open(info.absolute_path)
         pixels = torch.from_numpy(np.array(image)).permute(2, 0, 1).float()[None] / 127.5 - 1.0
         expected = vae.encode(pixels)[0]
-        assert torch.allclose(torch.from_numpy(latents), expected, atol=1e-5)
-        assert torch.allclose(torch.from_numpy(flipped), vae.encode(torch.flip(pixels, dims=[3]))[0], atol=1e-5)
+        # the loader returns tensors in the cache's storage dtype (fp32 by default), a view of the npz buffer
+        assert torch.allclose(latents, expected, atol=1e-5)
+        assert torch.allclose(flipped, vae.encode(torch.flip(pixels, dims=[3]))[0], atol=1e-5)
 
 
 class _TinyLinearAttentionLayer(torch.nn.Module):
