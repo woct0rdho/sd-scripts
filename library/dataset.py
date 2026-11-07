@@ -1264,7 +1264,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     latents = flipped_latents
                     alpha_mask = None if alpha_mask is None else alpha_mask[:, ::-1].copy()  # copy to avoid negative stride problem
                     del flipped_latents
-                latents = torch.FloatTensor(latents)
+                # `latents` already is a tensor in the cache's storage dtype (bf16/fp16/fp32), a view of the npz buffer
                 if alpha_mask is not None:
                     alpha_mask = torch.FloatTensor(alpha_mask)
 

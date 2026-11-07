@@ -114,6 +114,12 @@ def prepare_accelerator(args: argparse.Namespace):
     """
     import time
 
+    # process-wide settings that have to be in place before any dataset/cache work (local import: library.caching imports
+    # this module for HIGH_VRAM, so importing it at module level would be circular)
+    from library import caching
+
+    caching.set_storage_dtype(getattr(args, "latent_cache_dtype", None) or "fp32")
+
     if args.logging_dir is None:
         logging_dir = None
     else:

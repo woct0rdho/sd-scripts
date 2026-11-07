@@ -292,7 +292,7 @@ class ControlNetDataset(BaseDataset):
         )
         if flipped and flipped_latents is not None:
             latents = flipped_latents
-        return torch.FloatTensor(latents)
+        return latents  # a tensor in the cache's storage dtype, a view of the npz buffer
 
     def __len__(self):
         return self.dreambooth_dataset_delegate.__len__()

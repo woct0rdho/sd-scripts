@@ -1199,6 +1199,21 @@ def add_dataset_arguments(
         help="cache latents to disk to reduce VRAM usage (augmentations must be disabled) / VRAM削減のためにlatentをディスクにcacheする（augmentationは使用不可）",
     )
     parser.add_argument(
+        "--latent_cache_dtype",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16", "bf16"],
+        help="dtype the latent cache is stored in, independent of the VAE's dtype: bf16/fp16 halve the disk usage of"
+        " --cache_latents_to_disk (and the 2x cache of --flip_aug). bf16 keeps exactly a bf16 VAE's output; with an fp32"
+        " VAE it quantizes the cache, so use fp32 there or accept the rounding. The training step casts the latents to the"
+        " model dtype as before. Caches written in another dtype are re-cached; use tools/convert_latent_cache.py to"
+        " convert an existing folder in place"
+        " / latent キャッシュを保存する dtype（VAE の dtype とは独立）。bf16/fp16 で --cache_latents_to_disk のディスク使用量"
+        "（--flip_aug の2倍キャッシュも）が半分になる。bf16 は bf16 の VAE 出力をそのまま保持し、fp32 の VAE では丸めが入る。"
+        "学習時は従来どおりモデルの dtype へ変換される。別の dtype で作られたキャッシュは再キャッシュされる。既存のフォルダは"
+        " tools/convert_latent_cache.py でそのまま変換できる",
+    )
+    parser.add_argument(
         "--skip_cache_check",
         action="store_true",
         help="skip the content validation of cache (latent and text encoder output). Cache file existence check is always performed, and cache processing is performed if the file does not exist"

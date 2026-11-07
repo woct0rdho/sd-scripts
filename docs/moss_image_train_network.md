@@ -242,7 +242,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--text_encoder_batch_size=<integer>`
   - Number of captions processed per call when caching text encoder outputs. The text encoder itself always runs one caption at a time (no padding), so this only affects the loop granularity.
 * `--cache_latents`, `--cache_latents_to_disk`
-  - Cache the FLUX.2 VAE outputs. The cache files are `<image>_<W>x<H>_moss.npz` and hold the raw VAE output (32 channels, 1/8 resolution); the patchify and normalization for the DiT are applied at training time.
+  - Cache the FLUX.2 VAE outputs. The cache files are `<image>_<W>x<H>_moss.npz` and hold the raw VAE output (32 channels, 1/8 resolution); the patchify and normalization for the DiT are applied at training time. `flip_aug` stores both orientations for every bucket resolution, so the cache is twice as large; `--latent_cache_dtype bf16` halves it again (orthogonal to `--vae_dtype`, which only affects encoding), and `tools/convert_latent_cache.py --dir <image dir> --recursive --to bf16` converts an existing folder in place.
 * `--compile` and related options
   - Speed up training with per-block `torch.compile`. See the [torch.compile for Anima guide](anima_torch_compile.md) for details (the options are shared). The ConvRot INT8 Linear layers are compiled as well (the fused kernel is a custom op), so `--compile` speeds up INT8 training too.
 
@@ -292,7 +292,7 @@ Besides the arguments explained in the [train_network.py guide](train_network.md
 * `--gradient_checkpointing_skip_blocks` - 部分的な gradient checkpointing。42 個の DiT ブロックのうち末尾の N 個は backward で再計算せず activation を保持します。スキップしたブロック 1 個につき VRAM が増え、1 ブロック分の再計算が省けるため、VRAM 使用量とステップ時間は N に対して線形に変化します。`0`（デフォルト）で全ブロックを checkpointing、`42` で全ブロックをスキップします。`--gradient_checkpointing` 指定時のみ有効です（未指定時は警告を出して無視します）。`--blocks_to_swap`、`--cpu_offload_checkpointing`、`--unsloth_offload_checkpointing`、`--compile` と併用できます。実測値は [7.1 節](#71-vram-usage-optimization--vram-使用量の最適化) を参照。
 * `--cache_text_encoder_outputs`, `--cache_text_encoder_outputs_to_disk` - Qwen3.5-9B の出力をキャッシュします。テキストエンコーダーの LoRA を学習しない場合は強く推奨します（キャッシュ後にテキストエンコーダーは GPU から解放されます）。キャッシュファイルは `<image>_moss_te.npz` で、unconditional の埋め込みも保存されるため `caption_dropout_rate` を使用できます。`--network_train_unet_only` が必要です。画像の全キャプション候補の出力を一つのファイルに保存します（`num_candidates`、候補 `k` ごとの `prompt_embeds_{k}` / `attn_mask_{k}` / `caption_{k}`）。処理済みのキャプション文字列（`caption_prefix` / `caption_suffix` 適用後）も保存され、候補数や文字列が現在のキャプションと異なる場合は、`--skip_cache_check` を指定していなければ再キャッシュされます。バージョン 0.12.1 で作成したファイル（`num_candidates` なし）は、候補が一つの画像ではそのまま使えます。
 * `--text_encoder_batch_size` - テキストエンコーダー出力のキャッシュ時に 1 回に処理するキャプション数。テキストエンコーダー自体は常に 1 件ずつ（パディングなし）実行されるため、ループの粒度のみに影響します。
-* `--cache_latents`, `--cache_latents_to_disk` - FLUX.2 VAE の出力をキャッシュします。キャッシュファイルは `<image>_<W>x<H>_moss.npz` で、VAE の生の出力（32 チャンネル、1/8 解像度）を保存します。DiT 向けの patchify と正規化は学習時に行います。
+* `--cache_latents`, `--cache_latents_to_disk` - FLUX.2 VAE の出力をキャッシュします。キャッシュファイルは `<image>_<W>x<H>_moss.npz` で、VAE の生の出力（32 チャンネル、1/8 解像度）を保存します。DiT 向けの patchify と正規化は学習時に行います。`flip_aug` は全バケット解像度で両方向を保存するためキャッシュは2倍になり、`--latent_cache_dtype bf16` でさらに半分になります（`--vae_dtype` とは独立で、こちらはエンコード時の dtype）。既存フォルダは `tools/convert_latent_cache.py --dir <画像ディレクトリ> --recursive --to bf16` でその場で変換できます。
 * `--compile` 他 - ブロック単位の `torch.compile` で学習を高速化します。詳細は [Anima 向け torch.compile ガイド](anima_torch_compile.md) を参照してください（オプションは共通です）。ConvRot INT8 の Linear 層もコンパイル対象になる（融合カーネルは custom op）ため、INT8 学習でも `--compile` で高速化できます。
 
 #### 非互換・非サポートの引数

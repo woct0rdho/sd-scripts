@@ -31,6 +31,64 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Storage dtype of the cached latents. Independent of the VAE's weight/compute dtype: the values are quantized once, at
+# cache time, so a fp32 cache keeps more than a fp32 VAE produced and a bf16 cache keeps exactly a bf16 VAE's output.
+# npz has no bfloat16 dtype (numpy has none and ml-dtypes would store a vendor descr that np.load reads back as raw
+# `|V2` bytes), so bf16 is stored as the raw `uint16` bit pattern - the top half of the float32 - which every numpy
+# version reads, and the loader reinterprets it as a bfloat16 tensor without copying. fp16 is a native numpy dtype.
+LATENT_STORAGE_DTYPES = ("fp32", "fp16", "bf16")
+STORAGE_DTYPE_KEY = "latents_dtype"  # str marker inside the npz, so a reader knows what it got
+
+_storage_dtype = "fp32"
+
+
+def set_storage_dtype(name: str) -> None:
+    """Select the dtype for newly written latent caches (and the expected dtype of existing ones)."""
+    global _storage_dtype
+    if name not in LATENT_STORAGE_DTYPES:
+        raise ValueError(f"unknown latent cache dtype {name!r}, expected one of {LATENT_STORAGE_DTYPES}")
+    if name != _storage_dtype:
+        logger.info(f"latent cache storage dtype: {_storage_dtype} -> {name}")
+    _storage_dtype = name
+
+
+def get_storage_dtype() -> str:
+    return _storage_dtype
+
+
+def storage_np_dtype(name: str = None) -> np.dtype:
+    """The numpy dtype a cache in `name` uses on disk (`bf16` is stored as raw uint16 bits)."""
+    return {"fp32": np.dtype(np.float32), "fp16": np.dtype(np.float16), "bf16": np.dtype(np.uint16)}[name or _storage_dtype]
+
+
+def latent_to_storage(tensor: torch.Tensor, name: str = None) -> np.ndarray:
+    """A float tensor as it is stored in the npz (`fp32`, `fp16`, or `bf16` as raw uint16 bits).
+
+    `fp32` returns a view when the tensor is already a contiguous float32 CPU tensor (no copy); `bf16` rounds with the
+    same round-to-nearest-even conversion torch uses everywhere else.
+    """
+    name = name or _storage_dtype
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    if tensor.device.type != "cpu" or tensor.dtype != torch.float32:
+        tensor = tensor.to(device="cpu", dtype=torch.float32)
+    if name == "fp32":
+        return tensor.numpy()
+    if name == "fp16":
+        return tensor.to(torch.float16).numpy()
+    return tensor.to(torch.bfloat16).view(torch.uint16).numpy()
+
+
+def latent_from_storage(array: np.ndarray) -> torch.Tensor:
+    """A stored latent array as a tensor, without copying: uint16 bits are viewed as bfloat16 in place.
+
+    The numpy array must own its buffer (an `np.load` result does), because the tensor shares it.
+    """
+    tensor = torch.from_numpy(array)
+    if tensor.dtype == torch.uint16:  # bf16 stored as its top 16 bits
+        return tensor.view(torch.bfloat16)
+    return tensor
+
 
 def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool, alpha_mask: bool):
     expected_latents_size = (reso[1] // 8, reso[0] // 8)  # bucket_resoはWxHなので注意

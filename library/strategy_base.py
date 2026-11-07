@@ -436,6 +436,7 @@ class LatentsCachingStrategy:
     _strategy = None  # strategy instance: actual strategy class
 
     _warned_fallback_to_old_npz = False  # to avoid spamming logs about fallback
+    _warned_storage_dtype_mismatch = False  # ditto for a cache written in another dtype
 
     def __init__(self, cache_to_disk: bool, batch_size: int, skip_disk_cache_validity_check: bool) -> None:
         self._cache_to_disk = cache_to_disk
@@ -523,6 +524,18 @@ class LatentsCachingStrategy:
                 return False
             if apply_alpha_mask and ("alpha_mask" + key_reso_suffix not in npz and "alpha_mask" not in npz):
                 return False
+
+            # the cache holds one storage dtype; a cache written as fp32 must not be reused when bf16 was requested
+            stored = str(npz[caching.STORAGE_DTYPE_KEY]) if caching.STORAGE_DTYPE_KEY in npz else "fp32"
+            if stored != caching.get_storage_dtype():
+                if not self._warned_storage_dtype_mismatch:
+                    logger.warning(
+                        f"latent cache {os.path.basename(npz_path)} was stored as {stored} but "
+                        f"--latent_cache_dtype is {caching.get_storage_dtype()}: re-caching (run"
+                        " tools/convert_latent_cache.py to convert the existing cache in place instead)"
+                    )
+                    type(self)._warned_storage_dtype_mismatch = True
+                return False
         except Exception as e:
             logger.error(f"Error loading file: {npz_path}")
             raise e
@@ -597,7 +610,7 @@ class LatentsCachingStrategy:
 
     def load_latents_from_disk(
         self, npz_path: str, bucket_reso: Tuple[int, int]
-    ) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[List[int]], Optional[List[int]], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         For single resolution architectures (currently no architecture is single resolution specific). Kept for reference.
 
@@ -612,13 +625,14 @@ class LatentsCachingStrategy:
                 Optional[List[int]],
                 Optional[np.ndarray],
                 Optional[np.ndarray]
-            ]: Latent np tensors, original size, crop (left top, right bottom), flipped latents, alpha mask
+            ]: Latent tensors (in the stored dtype), original size, crop (left top, right bottom), flipped latents,
+                alpha mask
         """
         return self._default_load_latents_from_disk(None, npz_path, bucket_reso)
 
     def _default_load_latents_from_disk(
         self, latents_stride: Optional[int], npz_path: str, bucket_reso: Tuple[int, int]
-    ) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[List[int]], Optional[List[int]], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Args:
             latents_stride (Optional[int]): Stride for latents. If None, load all latents.
@@ -632,7 +646,8 @@ class LatentsCachingStrategy:
                 Optional[List[int]],
                 Optional[np.ndarray],
                 Optional[np.ndarray]
-            ]: Latent np tensors, original size, crop (left top, right bottom), flipped latents, alpha mask
+            ]: Latent tensors (in the stored dtype), original size, crop (left top, right bottom), flipped latents,
+                alpha mask
         """
         if latents_stride is None:
             key_reso_suffix = ""
@@ -653,10 +668,15 @@ class LatentsCachingStrategy:
                 self._warned_fallback_to_old_npz = True
             key_reso_suffix = ""
 
-        latents = npz["latents" + key_reso_suffix]
+        # tensors in the stored dtype (bf16 is viewed in place from its uint16 bits), no float32 round trip
+        latents = caching.latent_from_storage(npz["latents" + key_reso_suffix])
         original_size = npz["original_size" + key_reso_suffix].tolist()
         crop_ltrb = npz["crop_ltrb" + key_reso_suffix].tolist()
-        flipped_latents = npz["latents_flipped" + key_reso_suffix] if "latents_flipped" + key_reso_suffix in npz else None
+        flipped_latents = (
+            caching.latent_from_storage(npz["latents_flipped" + key_reso_suffix])
+            if "latents_flipped" + key_reso_suffix in npz
+            else None
+        )
         alpha_mask = npz["alpha_mask" + key_reso_suffix] if "alpha_mask" + key_reso_suffix in npz else None
         return latents, original_size, crop_ltrb, flipped_latents, alpha_mask
 
@@ -691,12 +711,13 @@ class LatentsCachingStrategy:
             for key in npz.files:
                 kwargs[key] = npz[key]
 
-        # TODO float() is needed if vae is in bfloat16. Remove it if vae is float16.
-        kwargs["latents" + key_reso_suffix] = latents_tensor.float().cpu().numpy()
+        # stored in the dtype of --latent_cache_dtype (bf16 as raw uint16 bits), independent of the VAE's dtype
+        kwargs["latents" + key_reso_suffix] = caching.latent_to_storage(latents_tensor)
         kwargs["original_size" + key_reso_suffix] = np.array(original_size)
         kwargs["crop_ltrb" + key_reso_suffix] = np.array(crop_ltrb)
         if flipped_latents_tensor is not None:
-            kwargs["latents_flipped" + key_reso_suffix] = flipped_latents_tensor.float().cpu().numpy()
+            kwargs["latents_flipped" + key_reso_suffix] = caching.latent_to_storage(flipped_latents_tensor)
         if alpha_mask is not None:
             kwargs["alpha_mask" + key_reso_suffix] = alpha_mask.float().cpu().numpy()
+        kwargs[caching.STORAGE_DTYPE_KEY] = np.array(caching.get_storage_dtype())
         np.savez(npz_path, **kwargs)
