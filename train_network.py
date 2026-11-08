@@ -215,6 +215,28 @@ class NetworkTrainer:
         """
         return text_encoders
 
+    def release_text_encoders_if_needed(self, args, accelerator, text_encoders) -> None:
+        """Park the text encoders on the meta device once their outputs are cached and nothing encodes with them again.
+
+        Pre-caching the outputs is what makes this safe: the trainers reject training a text encoder LoRA in that mode,
+        and `get_models_for_text_encoding` is the authority on whether anything encodes later (it returns None for
+        Anima, MOSS-Image and SD3/FLUX with both encoders cached, and the encoders SDXL still samples with).
+        `to("meta")` releases the tensors, where `to("cpu")` only moves them - which frees nothing on a machine whose
+        host and device memory are the same RAM, and leaves no room to offload a model to the CPU later.
+        """
+        if not getattr(args, "cache_text_encoder_outputs", False) or not text_encoders:
+            return
+        if self.is_train_text_encoder(args):
+            return  # its gradients will need it
+        if self.get_models_for_text_encoding(args, accelerator, text_encoders) is not None:
+            return  # still used for sampling/validation (e.g. SDXL), so it stays where it is
+        logger.info("move text encoders to meta device to save memory")
+        for text_encoder in text_encoders:
+            if text_encoder is not None:
+                text_encoder.to("meta")
+        clean_memory_on_device(accelerator.device)
+        gc.collect()
+
     # returns a list of bool values indicating whether each text encoder should be trained
     def get_text_encoders_train_flags(self, args, text_encoders):
         return [True] * len(text_encoders) if self.is_train_text_encoder(args) else [False] * len(text_encoders)
@@ -1213,6 +1235,9 @@ class NetworkTrainer:
         if unet is None:
             # lazy load unet if needed. text encoders may be freed or replaced with dummy models for saving memory
             unet, text_encoders = self.load_unet_lazily(args, weight_dtype, accelerator, text_encoders)
+            # the outputs are cached now, so the encoders are dead weight: the meta device releases them instead of
+            # moving them to the CPU (which is a no-op on a unified-memory machine)
+            self.release_text_encoders_if_needed(args, accelerator, text_encoders)
 
         # 差分追加学習のためにモデルを読み込む
         sys.path.append(os.path.dirname(__file__))
