@@ -496,18 +496,8 @@ def sample_images(
         for injecting per-prompt state into wrapper modules (e.g. ControlNet-LLLite cond image).
         Signature: ``on_prompt_start(prompt_dict, accelerator)`` / ``on_prompt_end(prompt_dict)``.
     """
-    if steps == 0:
-        if not args.sample_at_first:
-            return
-    else:
-        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
-            return
-        if args.sample_every_n_epochs is not None:
-            if epoch is None or epoch % args.sample_every_n_epochs != 0:
-                return
-        else:
-            if steps % args.sample_every_n_steps != 0 or epoch is not None:
-                return
+    if not sampling.should_sample_images(args, epoch, steps):
+        return
 
     logger.info(f"Generating sample images at step {steps}")
     if not os.path.isfile(args.sample_prompts) and sample_prompts_te_outputs is None:

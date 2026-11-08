@@ -303,18 +303,8 @@ def sample_images(
 ):
     """Generate sample images during training with the official sampler settings (steps 50, CFG 3.0, flow shift 5.0,
     uncond skip layer 22 by default). Per prompt options: `--w`, `--h`, `--s`, `--l`, `--fs`, `--n`, `--d`."""
-    if steps == 0:
-        if not args.sample_at_first:
-            return
-    else:
-        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
-            return
-        if args.sample_every_n_epochs is not None:
-            if epoch is None or epoch % args.sample_every_n_epochs != 0:
-                return
-        else:
-            if steps % args.sample_every_n_steps != 0 or epoch is not None:
-                return
+    if not sampling.should_sample_images(args, epoch, steps):
+        return
 
     logger.info(f"Generating sample images at step {steps}")
     if not os.path.isfile(args.sample_prompts) and sample_prompts_te_outputs is None:

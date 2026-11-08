@@ -160,6 +160,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         # Return format: (model_type, text_encoders, vae, unet)
         return "anima", [qwen3_text_encoder], vae, None  # unet loaded lazily
 
+    def supports_vae_reload(self, args) -> bool:
+        return True
+
+    def load_vae(self, args, dtype=None):
+        """The same loader `load_target_model` uses, so a released VAE comes back identically."""
+        vae = anima_train_utils.load_qwen_image_vae(args, device="cpu", disable_mmap=True)
+        return vae.to(dtype) if dtype is not None else vae
+
     def load_unet_lazily(self, args, weight_dtype, accelerator, text_encoders) -> tuple[nn.Module, list[nn.Module]]:
         loading_dtype = None if args.fp8_scaled else weight_dtype
         loading_device = "cpu" if self.is_swapping_blocks else accelerator.device

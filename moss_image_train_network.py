@@ -180,6 +180,20 @@ class MossImageNetworkTrainer(train_network.NetworkTrainer):
         # Return format: (model_type, text_encoders, vae, unet)
         return "moss_image", [text_encoder], vae, None  # DiT is loaded lazily
 
+    def supports_vae_reload(self, args) -> bool:
+        return True
+
+    def load_vae(self, args, dtype=None):
+        """The same loader `load_target_model` uses, so a released VAE comes back identically."""
+        vae = flux2_vae.load_flux2_vae(
+            args.vae,
+            dtype=dtype or torch.float32,
+            device="cpu",
+            disable_mmap=args.disable_mmap_load_safetensors,
+        )
+        vae.eval()
+        return vae
+
     def load_unet_lazily(self, args, weight_dtype, accelerator, text_encoders) -> tuple[nn.Module, list[nn.Module]]:
         loading_device = "cpu" if self.is_swapping_blocks else accelerator.device
 

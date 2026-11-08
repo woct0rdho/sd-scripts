@@ -72,6 +72,8 @@ class NetworkTrainer:
         self.vae_scale_factor = 0.18215
         self.is_sdxl = False
         self._adaptive_checkpointing = None  # built on the first step, see on_step_start
+        self._vae_released = False  # set by release_vae_if_needed, see the sampling path
+        self._vae_sampling_dtype = None
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -235,7 +237,65 @@ class NetworkTrainer:
             if text_encoder is not None:
                 text_encoder.to("meta")
         clean_memory_on_device(accelerator.device)
-        gc.collect()
+
+    def supports_vae_reload(self, args) -> bool:
+        """Whether this family can load its VAE back from `--vae` (i.e. whether it may be released)."""
+        return False
+
+    def load_vae(self, args, dtype=None):
+        """Load `--vae` again; overridden next to the family's own loader when `supports_vae_reload` is True."""
+        raise NotImplementedError
+
+    def is_vae_needed_for_training(self, args) -> bool:
+        """Whether the step itself needs the VAE, i.e. whether the latents are not cached."""
+        return not getattr(args, "cache_latents", False)
+
+    def release_vae_if_needed(self, args, accelerator, vae) -> None:
+        """Free the VAE when the latent cache turns it into a sampling-only model.
+
+        `to("meta")` releases the tensors where `to("cpu")` only moves them, which frees nothing on a machine whose
+        host and device memory are the same RAM. `prepare_vae_for_sampling` loads it back for the call that draws
+        samples and this releases it again afterwards, so the VAE and the sampling activations are only resident
+        between training steps: the peak is the larger of the step's and the sampling's, never their sum.
+        """
+        if self.is_vae_needed_for_training(args) or self._vae_released:
+            return
+        if not self.supports_vae_reload(args):
+            return  # cannot bring it back, so it has to stay
+        self._vae_sampling_dtype = getattr(vae, "dtype", None) or next(vae.parameters()).dtype
+        logger.info("move vae to meta device to save memory; it is reloaded to draw samples")
+        vae.to("meta")
+        clean_memory_on_device(accelerator.device)
+        self._vae_released = True
+
+    def prepare_vae_for_sampling(self, args, accelerator, vae):
+        """The VAE to draw samples with: reloaded from disk when `release_vae_if_needed` freed it."""
+        if not self._vae_released:
+            return vae
+        logger.info("reload vae for sampling")
+        vae = self.load_vae(args, dtype=self._vae_sampling_dtype)
+        vae.requires_grad_(False)
+        vae.eval()
+        vae.to(accelerator.device, dtype=self._vae_sampling_dtype)
+        self._vae_released = False
+        return vae
+
+    def sample_images_with_vae(self, accelerator, args, epoch, global_step, device, vae, tokenizers, text_encoder, unet):
+        """Draw samples with the VAE loaded for this call only, so sampling and training never share it.
+
+        The trainers call this on every step and epoch boundary and let `sample_images` decide whether to draw; the VAE
+        reload has to make the same decision, so it is taken here first and a call that draws nothing leaves the VAE
+        released.
+        """
+        if not sampling.should_sample_images(args, epoch, global_step):
+            return
+        vae_for_sampling = self.prepare_vae_for_sampling(args, accelerator, vae)
+        try:
+            self.sample_images(
+                accelerator, args, epoch, global_step, device, vae_for_sampling, tokenizers, text_encoder, unet
+            )
+        finally:
+            self.release_vae_if_needed(args, accelerator, vae_for_sampling)
 
     # returns a list of bool values indicating whether each text encoder should be trained
     def get_text_encoders_train_flags(self, args, text_encoders):
@@ -1521,6 +1581,11 @@ class NetworkTrainer:
             vae.requires_grad_(False)
             vae.eval()
             vae.to(accelerator.device, dtype=vae_dtype)
+        else:
+            # the latents are cached, so the step never touches the VAE: free it and load it only to draw samples.
+            # this runs before the first step, so `--adaptive_checkpointing`'s one-time measurement of the resident part
+            # already sees the freed memory as headroom
+            self.release_vae_if_needed(args, accelerator, vae)
 
         # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
         if args.full_fp16:
@@ -1759,7 +1824,9 @@ class NetworkTrainer:
 
         # For --sample_at_first
         optimizer_eval_fn()
-        self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+        self.sample_images_with_vae(
+            accelerator, args, 0, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+        )
         optimizer_train_fn()
         is_tracking = len(accelerator.trackers) > 0
         if is_tracking:
@@ -1929,7 +1996,7 @@ class NetworkTrainer:
                     global_step += 1
 
                     optimizer_eval_fn()
-                    self.sample_images(
+                    self.sample_images_with_vae(
                         accelerator, args, None, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
                     )
                     progress_bar.unpause()
@@ -2098,7 +2165,9 @@ class NetworkTrainer:
                     if args.save_state:
                         checkpoint_io.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+            self.sample_images_with_vae(
+                accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet
+            )
             progress_bar.unpause()
             optimizer_train_fn()
 

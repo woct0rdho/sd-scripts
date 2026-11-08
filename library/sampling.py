@@ -275,6 +275,21 @@ def load_prompts(prompt_file: str) -> List[Dict]:
     return prompts
 
 
+def should_sample_images(args: argparse.Namespace, epoch, steps: int) -> bool:
+    """Whether a sampling call at this point draws anything (`--sample_at_first` / `--sample_every_n_*`).
+
+    Every sampler and the trainer's VAE reload share this, so a step that draws nothing never touches the VAE.
+    """
+    if steps == 0:
+        return bool(args.sample_at_first)
+    if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
+        return False
+    if args.sample_every_n_epochs is not None:
+        # --sample_every_n_steps is ignored when sampling by epoch
+        return epoch is not None and epoch % args.sample_every_n_epochs == 0
+    return steps % args.sample_every_n_steps == 0 and epoch is None
+
+
 def sample_images_common(
     pipe_class,
     accelerator: Accelerator,
@@ -294,19 +309,8 @@ def sample_images_common(
     TODO Use strategies here
     """
 
-    if steps == 0:
-        if not args.sample_at_first:
-            return
-    else:
-        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
-            return
-        if args.sample_every_n_epochs is not None:
-            # sample_every_n_steps は無視する
-            if epoch is None or epoch % args.sample_every_n_epochs != 0:
-                return
-        else:
-            if steps % args.sample_every_n_steps != 0 or epoch is not None:  # steps is not divisible or end of epoch
-                return
+    if not should_sample_images(args, epoch, steps):
+        return
 
     logger.info("")
     logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
